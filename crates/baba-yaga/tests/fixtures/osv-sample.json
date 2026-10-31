@@ -1,0 +1,101 @@
+{
+  "results": [
+    {
+      "source": { "path": "/tmp/scan/web/go.mod", "type": "lockfile" },
+      "packages": [
+        {
+          "package": { "name": "google.golang.org/protobuf", "version": "1.32.0", "ecosystem": "Go" },
+          "vulnerabilities": [
+            {
+              "modified": "2024-03-05T22:05:46Z",
+              "published": "2024-03-05T22:05:46Z",
+              "schema_version": "1.6.0",
+              "id": "GO-2024-2611",
+              "aliases": ["CVE-2024-24786", "GHSA-8r3f-844c-mc37"],
+              "summary": "Infinite loop in JSON unmarshaling in google.golang.org/protobuf",
+              "affected": [
+                {
+                  "package": { "ecosystem": "Go", "name": "google.golang.org/protobuf" },
+                  "ranges": [
+                    { "type": "SEMVER", "events": [ { "introduced": "0" }, { "fixed": "1.33.0" } ] }
+                  ]
+                }
+              ]
+            },
+            {
+              "id": "GHSA-8r3f-844c-mc37",
+              "aliases": ["CVE-2024-24786", "GO-2024-2611"],
+              "summary": "golang protojson.Unmarshal function infinite loop when unmarshaling certain forms of invalid JSON",
+              "affected": [
+                {
+                  "package": { "ecosystem": "Go", "name": "google.golang.org/protobuf" },
+                  "ranges": [
+                    { "type": "SEMVER", "events": [ { "introduced": "0" }, { "fixed": "1.33.0" } ] }
+                  ]
+                }
+              ],
+              "severity": [ { "type": "CVSS_V3", "score": "CVSS:3.1/AV:N/AC:H/PR:N/UI:N/S:U/C:N/I:N/A:H" } ]
+            }
+          ],
+          "groups": [
+            {
+              "ids": ["GO-2024-2611", "GHSA-8r3f-844c-mc37"],
+              "aliases": ["CVE-2024-24786", "GHSA-8r3f-844c-mc37", "GO-2024-2611"],
+              "experimentalAnalysis": {
+                "GO-2024-2611": { "called": false, "unimportedSymbols": false }
+              },
+              "max_severity": "5.9"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": { "path": "/tmp/scan/web/frontend/package-lock.json", "type": "lockfile" },
+      "packages": [
+        {
+          "package": { "name": "lodash", "version": "4.17.11", "ecosystem": "npm" },
+          "vulnerabilities": [
+            {
+              "id": "GHSA-jf85-cpcp-j695",
+              "aliases": ["CVE-2019-10744"],
+              "summary": "Prototype Pollution in lodash",
+              "affected": [
+                {
+                  "package": { "ecosystem": "npm", "name": "lodash" },
+                  "ranges": [
+                    { "type": "SEMVER", "events": [ { "introduced": "0" }, { "fixed": "4.17.12" } ] }
+                  ]
+                }
+              ]
+            }
+          ],
+          "groups": [
+            {
+              "ids": ["GHSA-jf85-cpcp-j695"],
+              "aliases": ["CVE-2019-10744", "GHSA-jf85-cpcp-j695"],
+              "max_severity": "9.1"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "source": { "path": "/elsewhere/requirements.txt", "type": "lockfile" },
+      "packages": [
+        {
+          "package": { "name": "example-lib", "version": "1.0.0", "ecosystem": "PyPI" },
+          "vulnerabilities": [
+            {
+              "id": "PYSEC-2023-0001",
+              "aliases": [],
+              "summary": "",
+              "affected": []
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "experimental_config": { "licenses": { "summary": false } }
+}
