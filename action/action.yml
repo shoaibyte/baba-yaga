@@ -1,0 +1,8 @@
+name: baba-yaga
+description: Placeholder composite action for baba-yaga.
+runs:
+  using: composite
+  steps:
+    # TODO: install baba-yaga and run a scan.
+    - shell: bash
+      run: echo "baba-yaga action is not implemented yet"
