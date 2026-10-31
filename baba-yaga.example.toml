@@ -1,0 +1,22 @@
+# Copy to baba-yaga.toml and edit.
+
+# Switch room id the patrol reports to.
+room = "!replace-me:switch"
+
+# Cron with a seconds field: sec min hour day-of-month month day-of-week.
+# Weekdays at 07:00.
+schedule = "0 0 7 * * Mon-Fri"
+
+state_path = "baba-yaga.db"
+
+# Drop findings below this CVSS score. Findings without a score are kept.
+min_severity = 7.0
+
+[[repos]]
+name = "api"
+url = "https://github.com/example/api.git"
+branch = "main"
+
+[[repos]]
+name = "web"
+url = "https://github.com/example/web.git"
