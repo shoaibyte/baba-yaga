@@ -2,3 +2,4 @@ target/
 .env
 *.db
 scratch/
+.idea/
