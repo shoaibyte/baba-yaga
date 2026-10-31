@@ -1,0 +1,32 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
+[workspace.dependencies]
+switch-client = { path = "crates/switch-client" }
+
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3.34"
+# reqwest 0.13 renamed the `rustls-tls` feature to `rustls`.
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+uuid = { version = "1.29.0", features = ["v4", "serde"] }
+thiserror = "2.0.21"
+tracing = "0.1.44"
+url = "2.5.8"
+
+clap = { version = "4.6.7", features = ["derive"] }
+toml = "1.1.8"
+anyhow = "1.0.104"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+cron = "0.17.0"
+chrono = "0.4.45"
+tempfile = "3.27.0"
+dotenvy = "0.15.7"
