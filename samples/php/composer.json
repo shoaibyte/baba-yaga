@@ -1,0 +1,10 @@
+{
+    "name": "baba-yaga/sample-php",
+    "description": "Pins known-vulnerable releases on purpose. Never deploy.",
+    "type": "project",
+    "license": "MIT",
+    "require": {
+        "guzzlehttp/guzzle": "7.4.0",
+        "symfony/http-foundation": "5.4.0"
+    }
+}

@@ -1,0 +1,8 @@
+# Pinned to known-vulnerable releases on purpose. Never deploy.
+certifi==2020.12.5
+chardet==4.0.0
+idna==2.10
+jinja2==2.11.3
+markupsafe==1.1.1
+requests==2.25.1
+urllib3==1.26.4

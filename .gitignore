@@ -3,3 +3,5 @@ target/
 *.db
 scratch/
 .idea/
+samples/node/node_modules/
+samples/php/vendor/

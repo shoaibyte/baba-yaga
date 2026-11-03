@@ -1,0 +1,12 @@
+{
+  "name": "baba-yaga-sample-node",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pins known-vulnerable releases on purpose. Never deploy.",
+  "main": "index.js",
+  "dependencies": {
+    "axios": "0.21.1",
+    "lodash": "4.17.15",
+    "minimist": "1.2.5"
+  }
+}

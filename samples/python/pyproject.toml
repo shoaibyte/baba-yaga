@@ -1,0 +1,7 @@
+[project]
+name = "baba-yaga-sample-python"
+version = "0.0.0"
+description = "Pins known-vulnerable releases on purpose. Never deploy."
+requires-python = ">=3.8"
+# Exact versions are in requirements.txt.
+dependencies = ["requests", "urllib3", "jinja2"]
