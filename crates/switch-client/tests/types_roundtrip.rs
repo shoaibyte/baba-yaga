@@ -280,3 +280,12 @@ fn register_response_debug_redacts_api_key() {
     assert!(!debug.contains("sk-not-a-real-key"));
     assert_eq!(resp.api_key, "sk-not-a-real-key");
 }
+
+#[test]
+fn post_message_response_observed_shape() {
+    let resp: switch_client::PostMessageResponse =
+        serde_json::from_str(r#"{"event_id": "sw_01d31d8ec85342ffa2e078e87db2d211", "ok": true}"#)
+            .unwrap();
+    assert_eq!(resp.event_id, "sw_01d31d8ec85342ffa2e078e87db2d211");
+    assert!(resp.ok);
+}

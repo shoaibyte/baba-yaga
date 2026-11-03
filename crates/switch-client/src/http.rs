@@ -9,7 +9,7 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::types::{Addressing, RegisterRequest, RegisterResponse};
+use crate::types::{Addressing, PostMessageResponse, RegisterRequest, RegisterResponse};
 
 const CONNECTION_ID_HEADER: &str = "X-Switch-Connection-Id";
 /// Per-request limit for `Http::new`, so a bridge that accepts the
@@ -85,15 +85,15 @@ impl Http {
     }
 
     /// `POST /agents/{id}/message` with `{room_id, content}`. Needs no
-    /// connection. Returns the response body as-is.
-    // TODO(verify): the response body of this route is not documented.
+    /// connection. The response shape is observed, not documented; see
+    /// [`PostMessageResponse`].
     pub async fn post_message(
         &self,
         agent_key: &str,
         agent_id: &str,
         room_id: &str,
         content: &str,
-    ) -> Result<Value, Error> {
+    ) -> Result<PostMessageResponse, Error> {
         let url = self.url(&["agents", agent_id, "message"])?;
         tracing::debug!(room_id, content_len = content.len(), "posting message");
         let resp = self
@@ -103,12 +103,7 @@ impl Http {
             .json(&json!({ "room_id": room_id, "content": content }))
             .send()
             .await?;
-        let resp = check(resp).await?;
-        let text = resp.text().await?;
-        if text.trim().is_empty() {
-            return Ok(Value::Null);
-        }
-        Ok(serde_json::from_str(&text)?)
+        Ok(check(resp).await?.json().await?)
     }
 
     /// `POST /agents/{id}/ops/{op}`. `args` is the arguments object itself,

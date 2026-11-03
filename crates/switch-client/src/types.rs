@@ -80,6 +80,15 @@ impl std::fmt::Debug for RegisterResponse {
     }
 }
 
+/// Response of `POST /agents/{id}/message`. Not documented: this shape was
+/// observed on switch-core 0.31, e.g.
+/// `{"event_id": "sw_01d3...", "ok": true}`. Unknown fields are ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PostMessageResponse {
+    pub event_id: String,
+    pub ok: bool,
+}
+
 /// Who may address the agent, set through the `update_agent_detail` operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

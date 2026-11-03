@@ -15,8 +15,8 @@ pub use http::Http;
 pub use types::{
     close_code, Addressing, Attachment, CommandPayload, ConnectOptions, ConnectionModel,
     ConnectionState, ControlFrame, DomainEvent, EventData, EventPayload, Filter, Frame,
-    IntegrationProfile, MessagePayload, Pong, RegisterRequest, RegisterResponse, RoomJoinPayload,
-    Scope, StartFrom,
+    IntegrationProfile, MessagePayload, Pong, PostMessageResponse, RegisterRequest,
+    RegisterResponse, RoomJoinPayload, Scope, StartFrom,
 };
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;

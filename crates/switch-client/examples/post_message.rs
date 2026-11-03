@@ -69,6 +69,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(e) => return Err(e.into()),
     };
 
-    println!("{}", serde_json::to_string_pretty(&resp)?);
+    println!("event_id={}", resp.event_id);
+    println!("ok={}", resp.ok);
     Ok(())
 }
