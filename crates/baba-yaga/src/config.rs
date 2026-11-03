@@ -20,6 +20,14 @@ pub struct Config {
     /// Drop findings below this CVSS score. Unscored findings are kept.
     #[serde(default)]
     pub min_severity: Option<f32>,
+    /// Run osv-scanner's Go call analysis to fill in `reachable`. Skipped,
+    /// with a log line, when `go` is not on PATH.
+    #[serde(default = "default_true")]
+    pub call_analysis: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,6 +65,17 @@ mod tests {
         assert_eq!(config.repos[0].branch.as_deref(), Some("main"));
         assert_eq!(config.repos[1].branch, None);
         assert_eq!(config.min_severity, Some(7.0));
+        assert!(config.call_analysis);
+    }
+
+    #[test]
+    fn call_analysis_defaults_on() {
+        let text = r#"
+            room = "!r:switch"
+            schedule = "0 0 7 * * *"
+            state_path = "x.db"
+        "#;
+        assert!(Config::parse(text).unwrap().call_analysis);
     }
 
     #[test]

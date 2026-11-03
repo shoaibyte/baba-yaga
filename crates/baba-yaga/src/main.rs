@@ -69,12 +69,13 @@ async fn main() -> Result<()> {
 }
 
 fn scan(config_path: &std::path::Path, only: Option<String>, path: Option<PathBuf>) -> Result<()> {
-    let (repos, min_severity) = match path {
+    let (repos, min_severity, call_analysis) = match path {
         Some(dir) => {
-            let min = if config_path.exists() {
-                Config::load(config_path)?.min_severity
+            let (min, call_analysis) = if config_path.exists() {
+                let config = Config::load(config_path)?;
+                (config.min_severity, config.call_analysis)
             } else {
-                None
+                (None, true)
             };
             let name = dir
                 .canonicalize()?
@@ -85,7 +86,7 @@ fn scan(config_path: &std::path::Path, only: Option<String>, path: Option<PathBu
                 url: dir.to_string_lossy().into_owned(),
                 branch: None,
             };
-            (vec![repo], min)
+            (vec![repo], min, call_analysis)
         }
         None => {
             let config = Config::load(config_path)?;
@@ -97,13 +98,13 @@ fn scan(config_path: &std::path::Path, only: Option<String>, path: Option<PathBu
             if repos.is_empty() {
                 bail!("no repos to scan");
             }
-            (repos, config.min_severity)
+            (repos, config.min_severity, config.call_analysis)
         }
     };
 
     let mut findings = Vec::new();
     for repo in &repos {
-        findings.extend(scanner::scan_repo(repo)?);
+        findings.extend(scanner::scan_repo(repo, call_analysis)?);
     }
     let findings = scanner::filter_severity(findings, min_severity);
     tracing::info!(count = findings.len(), "scan finished");

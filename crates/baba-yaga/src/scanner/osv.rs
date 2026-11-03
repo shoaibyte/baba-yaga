@@ -12,11 +12,28 @@ use serde::Deserialize;
 
 use super::finding::Finding;
 
-/// Run `osv-scanner scan source -r --format json <dir>` and parse the result.
-pub fn scan_dir(repo: &str, dir: &Path) -> Result<Vec<Finding>> {
+/// Run `osv-scanner scan source -r --format json [--call-analysis=go] <dir>`
+/// and parse the result.
+///
+/// osv-scanner 2.x does no call analysis unless asked. With
+/// `--call-analysis=go` it builds the module with the `go` toolchain and
+/// marks each GO- advisory `called` true or false. `--call-analysis=all` is
+/// not used: it marks every advisory without symbol data (GHSA-only ones)
+/// as called, which is a conservative default, not an analysis.
+pub fn scan_dir(repo: &str, dir: &Path, call_analysis: bool) -> Result<Vec<Finding>> {
+    let mut cmd = Command::new("osv-scanner");
+    cmd.args(["scan", "source", "-r", "--format", "json"]);
+    let analyse = call_analysis && go_available();
+    if analyse {
+        cmd.arg("--call-analysis=go");
+        tracing::info!(repo, "Go call analysis: enabled");
+    } else if call_analysis {
+        tracing::info!(repo, "Go call analysis: skipped, `go` is not on PATH");
+    } else {
+        tracing::info!(repo, "Go call analysis: disabled in config");
+    }
     tracing::info!(repo, dir = %dir.display(), "running osv-scanner");
-    let output = Command::new("osv-scanner")
-        .args(["scan", "source", "-r", "--format", "json"])
+    let output = cmd
         .arg(dir)
         .output()
         .context("failed to run osv-scanner; is it installed and on PATH?")?;
@@ -26,7 +43,18 @@ pub fn scan_dir(repo: &str, dir: &Path) -> Result<Vec<Finding>> {
         Some(0) | Some(1) => {
             let stdout =
                 String::from_utf8(output.stdout).context("osv-scanner output is not UTF-8")?;
-            parse(&stdout, repo, dir)
+            let findings = parse(&stdout, repo, dir)?;
+            if analyse {
+                let go: Vec<&Finding> = findings.iter().filter(|f| f.ecosystem == "Go").collect();
+                tracing::info!(
+                    repo,
+                    go_findings = go.len(),
+                    analysed = go.iter().filter(|f| f.reachable.is_some()).count(),
+                    reachable = go.iter().filter(|f| f.reachable == Some(true)).count(),
+                    "Go call analysis ran"
+                );
+            }
+            Ok(findings)
         }
         Some(128) => {
             tracing::info!(repo, "osv-scanner found no packages");
@@ -38,6 +66,13 @@ pub fn scan_dir(repo: &str, dir: &Path) -> Result<Vec<Finding>> {
             String::from_utf8_lossy(&output.stderr).trim()
         ),
     }
+}
+
+fn go_available() -> bool {
+    Command::new("go")
+        .arg("version")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Parse an osv-scanner JSON report. `root` is stripped from source paths.

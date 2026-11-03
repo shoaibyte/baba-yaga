@@ -12,6 +12,10 @@ state_path = "baba-yaga.db"
 # Drop findings below this CVSS score. Findings without a score are kept.
 min_severity = 7.0
 
+# Go reachability via osv-scanner call analysis (default true). Needs `go` on
+# PATH and a module that builds; skipped with a log line otherwise.
+call_analysis = true
+
 [[repos]]
 name = "api"
 url = "https://github.com/example/api.git"
