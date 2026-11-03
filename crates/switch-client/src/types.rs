@@ -63,11 +63,21 @@ pub enum ConnectionModel {
     SessionPassive,
 }
 
-/// Response of `POST /agents`. The API key is returned once.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Response of `POST /agents`. The API key is returned once. `Debug`
+/// redacts it so a stray `{:?}` or `tracing` field cannot leak it.
+#[derive(Clone, Serialize, Deserialize)]
 pub struct RegisterResponse {
     pub id: String,
     pub api_key: String,
+}
+
+impl std::fmt::Debug for RegisterResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RegisterResponse")
+            .field("id", &self.id)
+            .field("api_key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Who may address the agent, set through the `update_agent_detail` operation.

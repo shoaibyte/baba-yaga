@@ -12,9 +12,10 @@ pub enum Error {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
-    /// HTTP 401, or close code 4401 on the socket.
-    #[error("authentication failed")]
-    Auth,
+    /// HTTP 401, or close code 4401 on the socket. Carries the response
+    /// body or close reason, which may be empty.
+    #[error("authentication failed: {0}")]
+    Auth(String),
 
     /// A `refused` frame at open. On the wire it is `{status, detail}`; the
     /// socket then closes with 4000 + status.

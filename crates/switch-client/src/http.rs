@@ -12,6 +12,9 @@ use crate::error::Error;
 use crate::types::{Addressing, RegisterRequest, RegisterResponse};
 
 const CONNECTION_ID_HEADER: &str = "X-Switch-Connection-Id";
+/// Per-request limit for `Http::new`, so a bridge that accepts the
+/// connection and never answers cannot hang the caller.
+const REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Debug, Clone)]
 pub struct Http {
@@ -28,7 +31,11 @@ struct OpResult<T> {
 impl Http {
     /// `base` is the bridge base URL, which is usually not the Gateway URL.
     pub fn new(base: Url) -> Self {
-        Self::with_client(base, reqwest::Client::new())
+        let client = reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("static reqwest config");
+        Self::with_client(base, client)
     }
 
     pub fn with_client(base: Url, client: reqwest::Client) -> Self {
@@ -143,7 +150,7 @@ impl Http {
     }
 }
 
-/// Map 401 to `Auth`, 409 to `Conflict`, and any other non-2xx to `Protocol`.
+/// Map 401 to `Auth`, 409 to `Conflict` (both with the body), and any other non-2xx to `Protocol`.
 async fn check(resp: Response) -> Result<Response, Error> {
     let status = resp.status();
     if status.is_success() {
@@ -152,7 +159,7 @@ async fn check(resp: Response) -> Result<Response, Error> {
     let body = resp.text().await.unwrap_or_default();
     tracing::warn!(%status, "switch request failed");
     match status {
-        StatusCode::UNAUTHORIZED => Err(Error::Auth),
+        StatusCode::UNAUTHORIZED => Err(Error::Auth(body)),
         StatusCode::CONFLICT => Err(Error::Conflict(body)),
         _ => Err(Error::Protocol(format!("{status}: {body}"))),
     }

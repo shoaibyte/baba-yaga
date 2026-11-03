@@ -270,3 +270,13 @@ fn register_request_and_response() {
         "owner_and_owner_agents"
     );
 }
+
+#[test]
+fn register_response_debug_redacts_api_key() {
+    let resp: switch_client::RegisterResponse =
+        serde_json::from_str(r#"{"id":"agent-1","api_key":"sk-not-a-real-key"}"#).unwrap();
+    let debug = format!("{resp:?}");
+    assert!(debug.contains("agent-1"));
+    assert!(!debug.contains("sk-not-a-real-key"));
+    assert_eq!(resp.api_key, "sk-not-a-real-key");
+}
