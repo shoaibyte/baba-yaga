@@ -1,0 +1,73 @@
+{
+  "results": [
+    {
+      "source": { "path": "/tmp/scan/svc/go.mod", "type": "lockfile" },
+      "packages": [
+        {
+          "package": { "name": "example.com/acme/httpkit", "version": "1.4.0", "ecosystem": "Go" },
+          "vulnerabilities": [
+            { "id": "GO-2099-0001", "aliases": ["CVE-2099-1001"], "summary": "Header parsing panics in httpkit" }
+          ],
+          "groups": [
+            {
+              "ids": ["GO-2099-0001"],
+              "aliases": ["CVE-2099-1001", "GO-2099-0001"],
+              "experimental_analysis": {
+                "GO-2099-0001": { "called": true, "unimportant": false }
+              },
+              "max_severity": ""
+            }
+          ]
+        },
+        {
+          "package": { "name": "example.com/acme/yamlish", "version": "0.9.2", "ecosystem": "Go" },
+          "vulnerabilities": [
+            { "id": "GO-2099-0002", "aliases": ["GHSA-aaaa-bbbb-cccc"] },
+            { "id": "GHSA-aaaa-bbbb-cccc", "aliases": ["GO-2099-0002"] }
+          ],
+          "groups": [
+            {
+              "ids": ["GO-2099-0002", "GHSA-aaaa-bbbb-cccc"],
+              "aliases": ["GHSA-aaaa-bbbb-cccc", "GO-2099-0002"],
+              "experimental_analysis": {
+                "GO-2099-0002": { "called": false, "unimportant": false }
+              },
+              "max_severity": "7.5"
+            }
+          ]
+        },
+        {
+          "package": { "name": "example.com/acme/cryptoish", "version": "2.0.0", "ecosystem": "Go" },
+          "vulnerabilities": [
+            { "id": "GHSA-dddd-eeee-ffff", "aliases": ["CVE-2099-1003"] }
+          ],
+          "groups": [
+            {
+              "ids": ["GHSA-dddd-eeee-ffff"],
+              "aliases": ["CVE-2099-1003", "GHSA-dddd-eeee-ffff"],
+              "max_severity": "5.3"
+            }
+          ]
+        },
+        {
+          "package": { "name": "stdlib", "version": "1.24.0", "ecosystem": "Go" },
+          "vulnerabilities": [
+            { "id": "GO-2099-0004" },
+            { "id": "GO-2099-0005" }
+          ],
+          "groups": [
+            {
+              "ids": ["GO-2099-0004", "GO-2099-0005"],
+              "aliases": ["GO-2099-0004", "GO-2099-0005"],
+              "experimental_analysis": {
+                "GO-2099-0004": { "called": false, "unimportant": false },
+                "GO-2099-0005": { "called": true, "unimportant": false }
+              },
+              "max_severity": ""
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

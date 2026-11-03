@@ -41,8 +41,8 @@
             {
               "ids": ["GO-2024-2611", "GHSA-8r3f-844c-mc37"],
               "aliases": ["CVE-2024-24786", "GHSA-8r3f-844c-mc37", "GO-2024-2611"],
-              "experimentalAnalysis": {
-                "GO-2024-2611": { "called": false, "unimportedSymbols": false }
+              "experimental_analysis": {
+                "GO-2024-2611": { "called": false, "unimportant": false }
               },
               "max_severity": "5.9"
             }

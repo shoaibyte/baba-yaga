@@ -232,7 +232,7 @@ struct Group {
     aliases: Vec<String>,
     #[serde(default)]
     max_severity: Option<String>,
-    #[serde(default, rename = "experimentalAnalysis")]
+    #[serde(default)]
     experimental_analysis: HashMap<String, Analysis>,
 }
 
@@ -313,6 +313,29 @@ mod tests {
         assert_eq!(f.severity_score, None);
         assert_eq!(f.summary, None);
         assert_eq!(f.source_path, "/elsewhere/requirements.txt");
+    }
+
+    /// Shape osv-scanner 2.7.0 emits with `--call-analysis=go`.
+    #[test]
+    fn call_analysis_maps_to_reachable() {
+        let json = include_str!("../../tests/fixtures/osv-call-analysis.json");
+        let f = parse(json, "svc", Path::new("/tmp/scan/svc")).unwrap();
+        let got: Vec<(&str, Option<bool>)> =
+            f.iter().map(|f| (f.id.as_str(), f.reachable)).collect();
+        assert_eq!(
+            got,
+            vec![
+                ("GO-2099-0001", Some(true)),
+                ("GO-2099-0002", Some(false)),
+                // No Go symbol data for a GHSA-only advisory: unknown.
+                ("GHSA-dddd-eeee-ffff", None),
+                // Any called id makes the group reachable.
+                ("GO-2099-0004", Some(true)),
+            ]
+        );
+        // An empty max_severity is no score, not a parse failure.
+        assert_eq!(f[0].severity_score, None);
+        assert_eq!(f[1].severity_score, Some(7.5));
     }
 
     #[test]
