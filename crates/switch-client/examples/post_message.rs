@@ -55,10 +55,13 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         Err(Error::Auth(_)) => {
             return Err("401: SWITCH_AGENT_KEY is not a valid agent API key".into())
         }
-        // `check` in http.rs formats other failures as "<status>: <body>".
-        Err(Error::Protocol(msg)) if msg.starts_with("403 ") || msg.starts_with("404 ") => {
+        Err(
+            e @ Error::Status {
+                code: 403 | 404, ..
+            },
+        ) => {
             return Err(format!(
-                "{msg}\nthe agent may not be a member of room {room_id}; \
+                "{e}\nthe agent may not be a member of room {room_id}; \
                  invite it with /invite-agent in the channel"
             )
             .into())

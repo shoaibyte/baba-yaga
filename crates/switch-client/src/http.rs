@@ -1,7 +1,7 @@
 //! HTTP calls to the agent bridge. Every call except `health` carries
 //! `Authorization: Bearer <key>`.
 
-use reqwest::{Response, StatusCode};
+use reqwest::Response;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -95,6 +95,7 @@ impl Http {
         content: &str,
     ) -> Result<Value, Error> {
         let url = self.url(&["agents", agent_id, "message"])?;
+        tracing::debug!(room_id, content_len = content.len(), "posting message");
         let resp = self
             .client
             .post(url)
@@ -150,7 +151,7 @@ impl Http {
     }
 }
 
-/// Map 401 to `Auth`, 409 to `Conflict` (both with the body), and any other non-2xx to `Protocol`.
+/// Pass a 2xx response through; turn anything else into an error.
 async fn check(resp: Response) -> Result<Response, Error> {
     let status = resp.status();
     if status.is_success() {
@@ -158,16 +159,37 @@ async fn check(resp: Response) -> Result<Response, Error> {
     }
     let body = resp.text().await.unwrap_or_default();
     tracing::warn!(%status, "switch request failed");
-    match status {
-        StatusCode::UNAUTHORIZED => Err(Error::Auth(body)),
-        StatusCode::CONFLICT => Err(Error::Conflict(body)),
-        _ => Err(Error::Protocol(format!("{status}: {body}"))),
+    Err(status_to_error(status.as_u16(), body))
+}
+
+/// Map 401 to `Auth`, 409 to `Conflict` and any other status to `Status`,
+/// each carrying the response body.
+fn status_to_error(code: u16, body: String) -> Error {
+    match code {
+        401 => Error::Auth(body),
+        409 => Error::Conflict(body),
+        _ => Error::Status { code, body },
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn other_status_becomes_typed_status_error() {
+        let err = status_to_error(500, "boom".into());
+        assert!(matches!(&err, Error::Status { code: 500, body } if body == "boom"));
+        assert_eq!(err.to_string(), "500: boom");
+        assert!(matches!(
+            status_to_error(401, String::new()),
+            Error::Auth(_)
+        ));
+        assert!(matches!(
+            status_to_error(409, String::new()),
+            Error::Conflict(_)
+        ));
+    }
 
     #[test]
     fn url_joins_segments_under_a_base_path() {

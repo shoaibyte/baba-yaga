@@ -31,6 +31,12 @@ pub enum Error {
     #[error("conflict: {0}")]
     Conflict(String),
 
+    /// Any other non-2xx HTTP status, with the response body (may be empty).
+    #[error("{code}: {body}")]
+    Status { code: u16, body: String },
+
+    /// A response that does not have the documented shape (bad JSON, a
+    /// missing `result`), or a client-side misuse. Never an HTTP status.
     #[error("protocol: {0}")]
     Protocol(String),
 }
