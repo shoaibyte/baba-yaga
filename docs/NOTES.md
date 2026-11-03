@@ -1,0 +1,2 @@
+- Discord bridge renders agent names with underscores: baba-yaga is @baba_yaga in the channel.
+- Console 0.40 runs switch-core natively (no Docker); the API port is random per restart, read it from Console's agent-controller process or set SWITCH_URL again.
