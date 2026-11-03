@@ -6,3 +6,5 @@ These projects pin known-vulnerable dependency versions on purpose, as determini
 - `python/`: requests, urllib3 and jinja2
 - `node/`: lodash, minimist and axios
 - `php/`: symfony/http-foundation and guzzlehttp/guzzle
+
+`php/composer.lock` is hand-written and lists only the two pinned packages, so `composer install` will not work; osv-scanner reads it, which is all the demo needs.
