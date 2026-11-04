@@ -42,3 +42,35 @@ Messages posted this stage: 1.
 - Consequence for Stage 4: `report` needs a socket for thread replies. Decision below in the Stage 4 entry.
 
 Messages posted this stage: 6 (two runs, three "[probe]" messages each). Room documents left behind: none.
+
+## 2026-11-04 16:33 to 16:50 Stage 4
+
+Commits, in order: cf7903c (source paths relative to the scan root, a fix found on the first samples scan), 0cb2883 grouping, 4ba532d state v2, 5b0f94e thread text and commands, b2abd1e serve loop, f142905 report, 115df1b singular "1 advisory", c60bcbe audit log.
+
+What was built
+- `FindingGroup` per (repo, ecosystem, package), with `highest_fixed` (approximate semver-ish compare; ignores git commit hashes OSV lists as PyPI fixes), `max_severity`, `any_reachable`. `scan --group` prints groups.
+- State v2: one row per group, key `repo:ecosystem:package`, vuln ids as JSON, thread_id, status (open, assigned, pr_open, reviewed, approved, snoozed, resolved), snoozed_until, first_seen, last_seen, last_posted, plus a `meta` table. v1 is dropped on open (PRAGMA user_version 2).
+- `render_group` (under 1500 chars, eight advisories, "more: N", command hint), `render_update`, `render_status` (one line per group, under 1900 chars), `render_help`. Commands: approve, reject, snooze Nd/Nw, status, scan [repo], help; noise words allowed, a negation before the verb makes it Unknown.
+- `serve`: posts the online line, scans at once, then on the cron schedule (UTC); handles addressed messages between scans. Thread replies go through the `post_message` op.
+- `report [--path DIR] [--no-state] [--dry-run]`: HTTP only, no socket. Writes state unless `--no-state`, so a later `serve` with the same state file does not repost. Changed groups that already have a thread are left unrecorded for `serve`, because HTTP cannot reply in threads.
+- Audit: `audit.log` beside the state file, mirrored whole (newest 900 KB) to the room document `baba-yaga-audit`. The document id is kept in state `meta`.
+
+Live checks
+- 16:36 `report --path samples --dry-run`: 12 posts, longest 1163 chars, all ASCII.
+- 16:38 `report --path samples --no-state`: 12 threads opened (Go 2, npm 3, PyPI 5, Packagist 2). The brief said 11, but those numbers add up to 12. certifi and idna have findings; chardet and markupsafe have none.
+- 16:39 `serve` with a fresh state file (scratchpad config, schedule `0 */30 * * * *`): connected, posted "Baba-Yaga online. Watching 1 repos. Next scan: 2026-11-04 16:00 UTC.", first scan opened 12 threads (duplicates of report's, accepted as planned). Stayed connected 5 min 22 s: no warning, error or reconnect. Waiting line: `next=2026-11-04 16:00 UTC`.
+- 16:45 killed and restarted `serve` on the same state file: connected at once, first scan "0 new threads, 0 updates, 12 unchanged". State dedup works. No 4409 on the immediate restart (the killed socket's claim was released at once), so the 4409 retry path is still untested live.
+- Decision on report and serve: report writes state unless `--no-state`. For this check report used `--no-state`, and serve used a fresh state file and posted duplicates.
+
+Messages posted this stage: 26 (12 report, 1 online, 12 serve, 1 online on restart). Room documents: none created (no approve, reject or snooze happened, so the audit mirror never ran).
+
+### Needs human (Stage 4)
+- Delete the duplicate threads: either report's 12 (16:38) or serve's 12 (16:39). Serve's state file points at serve's set (thread ids `sw_…` in the scratchpad state.db), so keep serve's if you will reuse that state.
+- With serve running, in one thread from serve's set: `@baba_yaga status`, `@baba_yaga approve`, `@baba_yaga snooze 30d`, and one at the top level, `@baba_yaga help`. Check the replies land in the thread, and that `audit.log` plus the `baba-yaga-audit` room document appear after approve or snooze.
+- Same for `reject` from a non-owner account, if you have one, to see "Only a room member can approve or reject." (any listed user counts as a member, so this may need a user outside the room).
+
+### Untested assumptions
+- A human reply inside a thread arrives with `payload.thread_id` equal to the root message id (what `find_by_thread` looks up). Ops normalise to the root, but the incoming event field has not been seen with a value yet.
+- Whether a reply inside the agent's own thread counts as `addressed` without an explicit @baba_yaga. The hint tells people to mention it.
+- Room member check matches `sender_name` against participant names; there is no shared id between message senders and `list_participants`.
+- `load_internal_documents` result shape (needs `ids`), so the audit document is written but never read back.

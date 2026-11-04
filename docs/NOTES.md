@@ -13,3 +13,6 @@
 - Room documents: `create_room_document` -> `{"document_id"}`; `update_room_document` and `delete_room_document` -> `{"document_id", "status": "ok"}`. Names are unique per room; only the creating agent can update or delete. `load_internal_documents` requires `ids` (400 without). Content cap 1 MiB per the schema.
 - `list_participants` -> `[{id, name, type: "agent"|"user", status, alias}]`; `status` is `live` for a connected agent and null for users. The room owner shows up as a `user`; `sender_role: "owner"` on message events is the only owner marker seen so far.
 - `read_context` entries: `{id, kind, sender, sender_name, body, timestamp, attachments}`; `sender` for an agent is `@switch-agent-<8 hex>:localhost`.
+- osv-scanner reports absolute, symlink-resolved manifest paths. `source_path` is made relative to the canonical scan root, so a relative `--path` works.
+- OSV lists git commit hashes as fixed "versions" for some PyPI advisories (requests, urllib3, certifi, idna), some starting with a digit (`74ea7cf…`). `highest_fixed` ignores anything that looks like a hash unless nothing else is listed.
+- The `cron` crate needs a seconds field: the 5-field `*/30 * * * *` is written `0 */30 * * * *`. baba-yaga evaluates schedules in UTC.
