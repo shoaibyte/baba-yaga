@@ -24,24 +24,29 @@ fn control(json: &str) -> ControlFrame {
     }
 }
 
+// Observed on switch-core 0.31; ids shortened.
 #[test]
-fn message_event() {
-    let json = r#"{"event":"message","data":{"type":"message","room_id":"f48120fd-a3d6-4928-af45-ff30ad757d2c","bridge_id":null,"channel_type":"channel_public","payload":{"addressed":true,"sender":"@switch-user-a1b2:switch","sender_name":"Kari","message_id":"$m1","body":"@baba-yaga status","timestamp":1761900000000,"thread_id":null,"attachments":[],"some_future_field":1},"sequence":15},"id":15}"#;
+fn message_event_observed() {
+    let json = r#"{"event":"message","data":{"type":"message","room_id":"f481","bridge_id":"ce5d","channel_type":"channel_public","payload":{"addressed":true,"sender":"@switch-discord-ce5d-shoaib2933:localhost","sender_name":"shoaib2933","sender_kind":null,"on_behalf_of":null,"message_id":"sw_0ecf","body":"@baba_yaga ping","timestamp":1793801710084,"thread_id":null,"attachments":[],"opening_message":null,"sender_role":"owner"},"sequence":9007194959773696,"missed":{"count":1,"reason":null}},"id":9007194959773696}"#;
     let Frame::Event(ev) = parse(json) else {
         panic!("expected domain event");
     };
     assert_eq!(ev.event, "message");
-    assert_eq!(ev.id, 15);
+    assert_eq!(ev.id, 9_007_194_959_773_696);
     assert_eq!(ev.data.sequence, ev.id);
-    assert_eq!(ev.data.kind, "message");
-    assert_eq!(ev.data.bridge_id, None);
-    assert_eq!(ev.data.channel_type.as_deref(), Some("channel_public"));
+    assert_eq!(ev.data.bridge_id.as_deref(), Some("ce5d"));
+    let missed = ev.data.missed.as_ref().expect("missed present");
+    assert_eq!(missed.count, 1);
+    assert_eq!(missed.reason, None);
     let EventPayload::Message(m) = ev.data.typed_payload().unwrap() else {
         panic!("expected message payload");
     };
     assert!(m.addressed);
-    assert_eq!(m.body, "@baba-yaga status");
-    assert_eq!(m.timestamp, 1_761_900_000_000);
+    assert_eq!(m.sender_role.as_deref(), Some("owner"));
+    assert_eq!(m.sender_name.as_deref(), Some("shoaib2933"));
+    assert_eq!(m.body, "@baba_yaga ping");
+    assert_eq!(m.timestamp, 1_793_801_710_084);
+    assert!(m.sender_kind.is_none() && m.on_behalf_of.is_none() && m.opening_message.is_none());
 }
 
 #[test]

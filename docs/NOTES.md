@@ -1,2 +1,6 @@
 - Discord bridge renders agent names with underscores: baba-yaga is @baba_yaga in the channel.
 - Console 0.40 runs switch-core natively (no Docker); the API port is random per restart, read it from Console's agent-controller process or set SWITCH_URL again.
+- Message payloads carry `sender_role` (observed `"owner"` for the room owner), plus `sender_kind`, `on_behalf_of` and `opening_message`, all null so far. None of these are in the agent-events docs.
+- Domain events carry `data.missed`, e.g. `{"count": 1, "reason": null}`. Undocumented; meaning of `count` unknown (it was 1 on a live message with no known loss).
+- Sequence numbers exceed 2^53 (e.g. 9007194959773696 = 2^53 - 2^32): they are packed values, not counters. Keep them u64, never route them through f64 or JSON-in-JS, and never compute `cursor + 1`.
+- The client pong is the flat `{"type":"pong","cursor":N}`, not the server's event envelope; switch-core 0.31 accepts it (40 s+ with no eviction).

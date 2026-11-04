@@ -310,8 +310,22 @@ pub struct EventData {
     pub channel_type: Option<String>,
     #[serde(default)]
     pub payload: Value,
-    /// Per-agent sequence across all rooms; not a room `seq`.
+    /// Per-agent sequence across all rooms; not a room `seq`. Observed values
+    /// exceed 2^53 (e.g. 9007194959773696): compare and echo, never do
+    /// arithmetic or pass through an f64.
     pub sequence: u64,
+    /// Observed on agent-protocol 9, not documented.
+    #[serde(default)]
+    pub missed: Option<Missed>,
+}
+
+/// `data.missed` on a domain event, e.g. `{"count": 1, "reason": null}`.
+/// Observed, not documented; the meaning of `count` is not yet known.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Missed {
+    pub count: u64,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 impl EventData {
@@ -445,9 +459,9 @@ pub struct Refused {
 }
 
 /// The only frame a client sends: `{"type": "pong", "cursor": 4813}`.
-// TODO(verify): server-to-client frames use the `{"event", "data"}` envelope
-// (observed on agent-protocol 9). This client-to-server shape is still the
-// documented flat one and has not been verified against the live server.
+/// Unlike server frames, this is the flat documented shape, not the
+/// `{"event", "data"}` envelope. Verified: switch-core 0.31 accepts it and
+/// does not evict.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename = "pong")]
 pub struct Pong {
@@ -477,6 +491,18 @@ pub struct MessagePayload {
     pub thread_id: Option<String>,
     #[serde(default)]
     pub attachments: Vec<Attachment>,
+    /// Observed `"owner"` for the room owner. Other values not yet seen.
+    #[serde(default)]
+    pub sender_role: Option<String>,
+    /// Observed null; shape unknown.
+    #[serde(default)]
+    pub sender_kind: Option<Value>,
+    /// Observed null; shape unknown.
+    #[serde(default)]
+    pub on_behalf_of: Option<Value>,
+    /// Observed null; shape unknown.
+    #[serde(default)]
+    pub opening_message: Option<Value>,
     // TODO(verify): agent-events says batch markers are in the event
     // "content"; it does not say whether they reach the agent payload.
     #[serde(

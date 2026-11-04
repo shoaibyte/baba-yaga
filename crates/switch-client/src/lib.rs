@@ -15,7 +15,7 @@ pub use http::Http;
 pub use types::{
     close_code, Addressing, Attachment, CommandPayload, ConnectOptions, ConnectionModel,
     ConnectionState, ControlFrame, DomainEvent, EventData, EventPayload, Evicted, Filter, Frame,
-    Gap, IntegrationProfile, MessagePayload, Pong, PostMessageResponse, RawFrame, Refused,
+    Gap, IntegrationProfile, MessagePayload, Missed, Pong, PostMessageResponse, RawFrame, Refused,
     RegisterRequest, RegisterResponse, RoomJoinPayload, RoomReleased, Scope, StartFrom,
     SubscriptionChanged,
 };
