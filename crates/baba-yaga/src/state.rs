@@ -1,54 +1,109 @@
-//! Finding state in SQLite: what has been seen, and where each finding is in
-//! the fix/review/approve loop.
+//! Finding state in SQLite, one row per (repo, ecosystem, package) group:
+//! which advisories were seen, which thread the group lives in, and where it
+//! is in the fix/review/approve loop.
 
 use std::path::Path;
 
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Row};
 
-use crate::scanner::Finding;
+use crate::scanner::finding::FindingGroup;
 
+const SCHEMA_VERSION: i64 = 2;
+
+/// Version 2. Version 1 had one row per advisory (`findings`). This is
+/// pre-release, so the migration drops v1 rather than converting it.
 const SCHEMA: &str = "
-CREATE TABLE IF NOT EXISTS findings (
-    dedup_key     TEXT PRIMARY KEY,
-    status        TEXT NOT NULL,
-    first_seen    TEXT NOT NULL,
-    last_seen     TEXT NOT NULL,
-    thread_id     TEXT,
-    pr_url        TEXT,
-    snoozed_until TEXT,
-    json          TEXT NOT NULL
+DROP TABLE IF EXISTS findings;
+CREATE TABLE IF NOT EXISTS groups (
+    key            TEXT PRIMARY KEY,  -- repo:ecosystem:package
+    vuln_ids       TEXT NOT NULL,     -- JSON array, sorted
+    highest_fixed  TEXT,
+    version        TEXT NOT NULL,
+    thread_id      TEXT,
+    status         TEXT NOT NULL,
+    snoozed_until  TEXT,
+    first_seen     TEXT NOT NULL,
+    last_seen      TEXT NOT NULL,
+    last_posted    TEXT,
+    json           TEXT NOT NULL      -- the FindingGroup
 );
-CREATE INDEX IF NOT EXISTS findings_status ON findings (status);
+CREATE INDEX IF NOT EXISTS groups_status ON groups (status);
+CREATE INDEX IF NOT EXISTS groups_thread ON groups (thread_id);
+CREATE TABLE IF NOT EXISTS meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
 ";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Open,
+    Assigned,
+    PrOpen,
+    Reviewed,
     Approved,
-    Rejected,
     Snoozed,
-    Fixed,
+    /// Fixed, or rejected by a room member.
+    Resolved,
 }
 
 impl Status {
     pub fn as_str(self) -> &'static str {
         match self {
             Status::Open => "open",
+            Status::Assigned => "assigned",
+            Status::PrOpen => "pr_open",
+            Status::Reviewed => "reviewed",
             Status::Approved => "approved",
-            Status::Rejected => "rejected",
             Status::Snoozed => "snoozed",
-            Status::Fixed => "fixed",
+            Status::Resolved => "resolved",
         }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        Ok(match s {
+            "open" => Status::Open,
+            "assigned" => Status::Assigned,
+            "pr_open" => Status::PrOpen,
+            "reviewed" => Status::Reviewed,
+            "approved" => Status::Approved,
+            "snoozed" => Status::Snoozed,
+            "resolved" => Status::Resolved,
+            other => bail!("unknown status {other:?} in state"),
+        })
     }
 }
 
-/// Whether `upsert_finding` saw the finding for the first time.
+/// How a scanned group compares with what state already holds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Upsert {
+pub enum Change {
+    /// Not in state yet.
     New,
-    Seen,
+    /// New advisory ids, a different highest fix, or a different version.
+    Changed,
+    Unchanged,
+}
+
+/// One stored group and its loop state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct GroupState {
+    pub key: String,
+    pub group: FindingGroup,
+    pub thread_id: Option<String>,
+    pub status: Status,
+    pub snoozed_until: Option<DateTime<Utc>>,
+    pub first_seen: DateTime<Utc>,
+    pub last_seen: DateTime<Utc>,
+    pub last_posted: Option<DateTime<Utc>>,
+}
+
+impl GroupState {
+    /// Snoozed with a snooze still running at `now`.
+    pub fn is_snoozed(&self, now: DateTime<Utc>) -> bool {
+        self.status == Status::Snoozed && self.snoozed_until.is_some_and(|t| t > now)
+    }
 }
 
 pub struct State {
@@ -67,100 +122,249 @@ impl State {
     }
 
     fn init(conn: Connection) -> Result<Self> {
-        conn.execute_batch(SCHEMA)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version < SCHEMA_VERSION {
+            conn.execute_batch(SCHEMA)?;
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        } else if version > SCHEMA_VERSION {
+            bail!("state db schema {version} is newer than this build ({SCHEMA_VERSION})");
+        }
         Ok(Self { conn })
     }
 
-    /// Insert a new finding as open, or refresh `last_seen` and the stored
-    /// JSON of one already known. Status and thread are left alone.
-    pub fn upsert_finding(&self, finding: &Finding, now: DateTime<Utc>) -> Result<Upsert> {
-        let key = finding.dedup_key();
-        let json = serde_json::to_string(finding)?;
+    /// Compare a scanned group with the stored one, without writing.
+    pub fn classify(&self, group: &FindingGroup) -> Result<Change> {
+        let Some(old) = self.get(&group.key())? else {
+            return Ok(Change::New);
+        };
+        let old_ids = old.group.vuln_ids();
+        let has_new_id = group.vuln_ids().iter().any(|id| !old_ids.contains(id));
+        Ok(
+            if has_new_id
+                || group.highest_fixed != old.group.highest_fixed
+                || group.version != old.group.version
+            {
+                Change::Changed
+            } else {
+                Change::Unchanged
+            },
+        )
+    }
+
+    /// Store a scanned group: insert it as open, or refresh its ids, fix,
+    /// version and `last_seen`. Status, thread and snooze are left alone.
+    pub fn record(&self, group: &FindingGroup, now: DateTime<Utc>) -> Result<()> {
         let now = now.to_rfc3339();
-        let existed: bool = self
-            .conn
+        self.conn.execute(
+            "INSERT INTO groups (key, vuln_ids, highest_fixed, version, status, first_seen, last_seen, json)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6, ?7)
+             ON CONFLICT (key) DO UPDATE SET
+                 vuln_ids = excluded.vuln_ids,
+                 highest_fixed = excluded.highest_fixed,
+                 version = excluded.version,
+                 last_seen = excluded.last_seen,
+                 json = excluded.json",
+            params![
+                group.key(),
+                serde_json::to_string(&group.vuln_ids())?,
+                group.highest_fixed,
+                group.version,
+                Status::Open.as_str(),
+                now,
+                serde_json::to_string(group)?,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get(&self, key: &str) -> Result<Option<GroupState>> {
+        self.conn
             .query_row(
-                "SELECT 1 FROM findings WHERE dedup_key = ?1",
+                &format!("SELECT {COLUMNS} FROM groups WHERE key = ?1"),
                 params![key],
-                |_| Ok(()),
+                read_row,
             )
             .optional()?
-            .is_some();
-        self.conn.execute(
-            "INSERT INTO findings (dedup_key, status, first_seen, last_seen, json)
-             VALUES (?1, ?2, ?3, ?3, ?4)
-             ON CONFLICT (dedup_key) DO UPDATE SET last_seen = excluded.last_seen, json = excluded.json",
-            params![key, Status::Open.as_str(), now, json],
-        )?;
-        Ok(if existed { Upsert::Seen } else { Upsert::New })
+            .transpose()
     }
 
-    pub fn set_status(&self, dedup_key: &str, status: Status) -> Result<()> {
-        let n = self.conn.execute(
-            "UPDATE findings SET status = ?2 WHERE dedup_key = ?1",
-            params![dedup_key, status.as_str()],
-        )?;
-        if n == 0 {
-            bail!("unknown finding {dedup_key}");
-        }
-        Ok(())
+    /// The group whose thread root is `thread_id`.
+    pub fn find_by_thread(&self, thread_id: &str) -> Result<Option<GroupState>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {COLUMNS} FROM groups WHERE thread_id = ?1"),
+                params![thread_id],
+                read_row,
+            )
+            .optional()?
+            .transpose()
     }
 
-    /// Mark a finding snoozed until `until`; `list_open` returns it again after.
-    pub fn snooze(&self, dedup_key: &str, until: DateTime<Utc>) -> Result<()> {
-        let n = self.conn.execute(
-            "UPDATE findings SET status = ?2, snoozed_until = ?3 WHERE dedup_key = ?1",
-            params![dedup_key, Status::Snoozed.as_str(), until.to_rfc3339()],
-        )?;
-        if n == 0 {
-            bail!("unknown finding {dedup_key}");
-        }
-        Ok(())
+    /// Remember the thread a group was posted in.
+    pub fn set_thread(&self, key: &str, thread_id: &str, now: DateTime<Utc>) -> Result<()> {
+        self.update(
+            key,
+            "thread_id = ?2, last_posted = ?3",
+            params![key, thread_id, now.to_rfc3339()],
+        )
     }
 
-    /// Open findings, plus snoozed ones whose snooze has run out at `now`,
-    /// oldest first.
-    pub fn list_open(&self, now: DateTime<Utc>) -> Result<Vec<Finding>> {
+    pub fn mark_posted(&self, key: &str, now: DateTime<Utc>) -> Result<()> {
+        self.update(key, "last_posted = ?2", params![key, now.to_rfc3339()])
+    }
+
+    /// Set a status and clear any snooze.
+    pub fn set_status(&self, key: &str, status: Status) -> Result<()> {
+        self.update(
+            key,
+            "status = ?2, snoozed_until = NULL",
+            params![key, status.as_str()],
+        )
+    }
+
+    pub fn snooze(&self, key: &str, until: DateTime<Utc>) -> Result<()> {
+        self.update(
+            key,
+            "status = ?2, snoozed_until = ?3",
+            params![key, Status::Snoozed.as_str(), until.to_rfc3339()],
+        )
+    }
+
+    /// Put every snoozed group whose snooze has run out at `now` back to
+    /// open. Returns their keys.
+    pub fn reopen_expired(&self, now: DateTime<Utc>) -> Result<Vec<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT json FROM findings
-             WHERE status = ?1 OR (status = ?2 AND snoozed_until <= ?3)
-             ORDER BY first_seen, dedup_key",
+            "UPDATE groups SET status = ?1, snoozed_until = NULL
+             WHERE status = ?2 AND snoozed_until <= ?3
+             RETURNING key",
         )?;
+        let keys = stmt
+            .query_map(
+                params![
+                    Status::Open.as_str(),
+                    Status::Snoozed.as_str(),
+                    now.to_rfc3339()
+                ],
+                |r| r.get::<_, String>(0),
+            )?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(keys)
+    }
+
+    /// Groups not resolved and not snoozed at `now`, by key.
+    pub fn list_open(&self, now: DateTime<Utc>) -> Result<Vec<GroupState>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM groups
+             WHERE status != ?1 AND NOT (status = ?2 AND snoozed_until > ?3)
+             ORDER BY key"
+        ))?;
         let rows = stmt.query_map(
             params![
-                Status::Open.as_str(),
+                Status::Resolved.as_str(),
                 Status::Snoozed.as_str(),
                 now.to_rfc3339()
             ],
-            |row| row.get::<_, String>(0),
+            read_row,
         )?;
         let mut out = Vec::new();
-        for json in rows {
-            out.push(serde_json::from_str(&json?)?);
+        for row in rows {
+            out.push(row??);
         }
         Ok(out)
     }
+
+    pub fn meta(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", params![key], |r| {
+                r.get(0)
+            })
+            .optional()?)
+    }
+
+    pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    fn update(&self, key: &str, set: &str, args: impl rusqlite::Params) -> Result<()> {
+        let n = self
+            .conn
+            .execute(&format!("UPDATE groups SET {set} WHERE key = ?1"), args)?;
+        if n == 0 {
+            bail!("unknown group {key}");
+        }
+        Ok(())
+    }
+}
+
+const COLUMNS: &str =
+    "key, json, thread_id, status, snoozed_until, first_seen, last_seen, last_posted";
+
+/// Map one row; the inner `Result` carries JSON and date errors, which
+/// rusqlite's closure type cannot.
+fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<GroupState>> {
+    let key: String = row.get(0)?;
+    let json: String = row.get(1)?;
+    let thread_id: Option<String> = row.get(2)?;
+    let status: String = row.get(3)?;
+    let snoozed_until: Option<String> = row.get(4)?;
+    let first_seen: String = row.get(5)?;
+    let last_seen: String = row.get(6)?;
+    let last_posted: Option<String> = row.get(7)?;
+    Ok((|| {
+        Ok(GroupState {
+            key,
+            group: serde_json::from_str(&json)?,
+            thread_id,
+            status: Status::parse(&status)?,
+            snoozed_until: snoozed_until.as_deref().map(parse_time).transpose()?,
+            first_seen: parse_time(&first_seen)?,
+            last_seen: parse_time(&last_seen)?,
+            last_posted: last_posted.as_deref().map(parse_time).transpose()?,
+        })
+    })())
+}
+
+fn parse_time(s: &str) -> Result<DateTime<Utc>> {
+    Ok(DateTime::parse_from_rfc3339(s)
+        .with_context(|| format!("bad time {s:?} in state"))?
+        .with_timezone(&Utc))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scanner::{group, Finding};
     use chrono::{Duration, TimeZone};
 
-    fn finding(id: &str) -> Finding {
+    fn finding(package: &str, id: &str, fixed: &str) -> Finding {
         Finding {
             repo: "web".into(),
             ecosystem: "npm".into(),
-            package: "lodash".into(),
+            package: package.into(),
             version: "4.17.11".into(),
             id: id.into(),
             aliases: vec![],
             summary: Some("Prototype Pollution".into()),
             severity_score: Some(9.1),
-            fixed_version: Some("4.17.12".into()),
+            fixed_version: Some(fixed.into()),
             reachable: None,
             source_path: "package-lock.json".into(),
         }
+    }
+
+    fn lodash(ids: &[(&str, &str)]) -> FindingGroup {
+        group(
+            ids.iter()
+                .map(|(id, fix)| finding("lodash", id, fix))
+                .collect(),
+        )
+        .remove(0)
     }
 
     fn t0() -> DateTime<Utc> {
@@ -168,43 +372,100 @@ mod tests {
     }
 
     #[test]
-    fn upsert_reports_new_then_seen() {
+    fn classify_new_changed_unchanged() {
         let s = State::open_in_memory().unwrap();
-        let f = finding("GHSA-1");
-        assert_eq!(s.upsert_finding(&f, t0()).unwrap(), Upsert::New);
-        assert_eq!(
-            s.upsert_finding(&f, t0() + Duration::hours(1)).unwrap(),
-            Upsert::Seen
-        );
-        assert_eq!(s.list_open(t0()).unwrap(), vec![f]);
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        assert_eq!(s.classify(&g).unwrap(), Change::New);
+        s.record(&g, t0()).unwrap();
+        assert_eq!(s.classify(&g).unwrap(), Change::Unchanged);
+
+        let more = lodash(&[("GHSA-1", "4.17.12"), ("GHSA-2", "4.17.12")]);
+        assert_eq!(s.classify(&more).unwrap(), Change::Changed);
+        let higher_fix = lodash(&[("GHSA-1", "4.17.21")]);
+        assert_eq!(s.classify(&higher_fix).unwrap(), Change::Changed);
+        // An advisory that went away is not a change worth posting.
+        s.record(&more, t0()).unwrap();
+        assert_eq!(s.classify(&g).unwrap(), Change::Unchanged);
     }
 
     #[test]
-    fn upsert_keeps_status() {
+    fn record_keeps_status_thread_and_first_seen() {
         let s = State::open_in_memory().unwrap();
-        let f = finding("GHSA-1");
-        s.upsert_finding(&f, t0()).unwrap();
-        s.set_status(&f.dedup_key(), Status::Rejected).unwrap();
-        s.upsert_finding(&f, t0()).unwrap();
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        s.record(&g, t0()).unwrap();
+        s.set_thread(&g.key(), "sw_root", t0()).unwrap();
+        s.set_status(&g.key(), Status::Approved).unwrap();
+        s.record(&g, t0() + Duration::hours(1)).unwrap();
+
+        let row = s.get("web:npm:lodash").unwrap().unwrap();
+        assert_eq!(row.status, Status::Approved);
+        assert_eq!(row.thread_id.as_deref(), Some("sw_root"));
+        assert_eq!(row.first_seen, t0());
+        assert_eq!(row.last_seen, t0() + Duration::hours(1));
+        assert_eq!(row.last_posted, Some(t0()));
+        assert_eq!(row.group, g);
+        assert_eq!(s.find_by_thread("sw_root").unwrap().unwrap().key, row.key);
+        assert!(s.find_by_thread("sw_other").unwrap().is_none());
+    }
+
+    #[test]
+    fn open_snoozed_open_after_expiry() {
+        let s = State::open_in_memory().unwrap();
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        let key = g.key();
+        s.record(&g, t0()).unwrap();
+        assert_eq!(s.list_open(t0()).unwrap().len(), 1);
+
+        s.snooze(&key, t0() + Duration::days(30)).unwrap();
+        let row = s.get(&key).unwrap().unwrap();
+        assert_eq!(row.status, Status::Snoozed);
+        assert!(row.is_snoozed(t0()));
         assert!(s.list_open(t0()).unwrap().is_empty());
+        assert!(s.reopen_expired(t0()).unwrap().is_empty());
+
+        let later = t0() + Duration::days(30);
+        assert!(!row.is_snoozed(later));
+        assert_eq!(s.list_open(later).unwrap().len(), 1, "due snooze is listed");
+        assert_eq!(s.reopen_expired(later).unwrap(), vec![key.clone()]);
+        let row = s.get(&key).unwrap().unwrap();
+        assert_eq!(row.status, Status::Open);
+        assert_eq!(row.snoozed_until, None);
     }
 
     #[test]
-    fn set_status_unknown_key_fails() {
+    fn resolved_is_not_open_and_unknown_key_fails() {
         let s = State::open_in_memory().unwrap();
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        s.record(&g, t0()).unwrap();
+        s.set_status(&g.key(), Status::Resolved).unwrap();
+        assert!(s.list_open(t0()).unwrap().is_empty());
         assert!(s.set_status("nope", Status::Approved).is_err());
     }
 
     #[test]
-    fn snoozed_findings_return_when_due() {
-        let s = State::open_in_memory().unwrap();
-        let a = finding("GHSA-a");
-        let b = finding("GHSA-b");
-        s.upsert_finding(&a, t0()).unwrap();
-        s.upsert_finding(&b, t0()).unwrap();
-        s.snooze(&a.dedup_key(), t0() + Duration::days(7)).unwrap();
-
-        assert_eq!(s.list_open(t0()).unwrap(), vec![b.clone()]);
-        assert_eq!(s.list_open(t0() + Duration::days(7)).unwrap(), vec![a, b]);
+    fn v1_database_is_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE findings (dedup_key TEXT PRIMARY KEY);")
+                .unwrap();
+        }
+        let s = State::open(&path).unwrap();
+        let has_v1: bool = s
+            .conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE name = 'findings'",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+            > 0;
+        assert!(!has_v1);
+        s.set_meta("audit_doc", "doc-1").unwrap();
+        drop(s);
+        // Reopening at v2 keeps data.
+        let s = State::open(&path).unwrap();
+        assert_eq!(s.meta("audit_doc").unwrap().as_deref(), Some("doc-1"));
     }
 }

@@ -329,8 +329,13 @@ mod tests {
         assert_eq!(f.reachable, Some(false));
         assert_eq!(f.source_path, "go.mod");
         assert_eq!(
-            f.dedup_key(),
-            "web:Go:google.golang.org/protobuf:GO-2024-2611"
+            (
+                f.repo.as_str(),
+                f.ecosystem.as_str(),
+                f.package.as_str(),
+                f.id.as_str()
+            ),
+            ("web", "Go", "google.golang.org/protobuf", "GO-2024-2611")
         );
     }
 

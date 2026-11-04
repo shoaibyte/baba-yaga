@@ -27,15 +27,6 @@ pub struct Finding {
     pub source_path: String,
 }
 
-impl Finding {
-    pub fn dedup_key(&self) -> String {
-        format!(
-            "{}:{}:{}:{}",
-            self.repo, self.ecosystem, self.package, self.id
-        )
-    }
-}
-
 /// All findings for one package in one repository: the unit that gets a
 /// thread in the room.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -56,8 +47,6 @@ pub struct FindingGroup {
     pub any_reachable: Option<bool>,
 }
 
-// Used by state v2, the next commit; remove this allow there.
-#[allow(dead_code)]
 impl FindingGroup {
     /// `repo:ecosystem:package`, the state key.
     pub fn key(&self) -> String {
