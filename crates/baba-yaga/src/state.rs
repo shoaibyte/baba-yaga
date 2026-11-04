@@ -49,8 +49,10 @@ pub enum Status {
     Reviewed,
     Approved,
     Snoozed,
-    /// Fixed, or rejected by a room member.
+    /// Fixed.
     Resolved,
+    /// Closed by a room member as not needed.
+    Rejected,
 }
 
 impl Status {
@@ -63,6 +65,7 @@ impl Status {
             Status::Approved => "approved",
             Status::Snoozed => "snoozed",
             Status::Resolved => "resolved",
+            Status::Rejected => "rejected",
         }
     }
 
@@ -75,6 +78,7 @@ impl Status {
             "approved" => Status::Approved,
             "snoozed" => Status::Snoozed,
             "resolved" => Status::Resolved,
+            "rejected" => Status::Rejected,
             other => bail!("unknown status {other:?} in state"),
         })
     }
@@ -271,26 +275,32 @@ impl State {
         Ok(keys)
     }
 
-    /// Groups not resolved and not snoozed at `now`, by key.
+    /// Groups not resolved, not rejected and not snoozed at `now`, by key.
     pub fn list_open(&self, now: DateTime<Utc>) -> Result<Vec<GroupState>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {COLUMNS} FROM groups
-             WHERE status != ?1 AND NOT (status = ?2 AND snoozed_until > ?3)
+             WHERE status NOT IN (?1, ?2) AND NOT (status = ?3 AND snoozed_until > ?4)
              ORDER BY key"
         ))?;
         let rows = stmt.query_map(
             params![
                 Status::Resolved.as_str(),
+                Status::Rejected.as_str(),
                 Status::Snoozed.as_str(),
                 now.to_rfc3339()
             ],
             read_row,
         )?;
-        let mut out = Vec::new();
-        for row in rows {
-            out.push(row??);
-        }
-        Ok(out)
+        collect(rows)
+    }
+
+    /// Groups with exactly this status, by key.
+    pub fn list_status(&self, status: Status) -> Result<Vec<GroupState>> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM groups WHERE status = ?1 ORDER BY key"
+        ))?;
+        let rows = stmt.query_map(params![status.as_str()], read_row)?;
+        collect(rows)
     }
 
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
@@ -320,6 +330,16 @@ impl State {
         }
         Ok(())
     }
+}
+
+fn collect(
+    rows: impl Iterator<Item = rusqlite::Result<Result<GroupState>>>,
+) -> Result<Vec<GroupState>> {
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row??);
+    }
+    Ok(out)
 }
 
 const COLUMNS: &str =
@@ -452,6 +472,19 @@ mod tests {
         let row = s.get(&key).unwrap().unwrap();
         assert_eq!(row.status, Status::Open);
         assert_eq!(row.snoozed_until, None);
+    }
+
+    #[test]
+    fn rejected_is_its_own_status_and_not_open() {
+        let s = State::open_in_memory().unwrap();
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        s.record(&g, t0()).unwrap();
+        s.set_status(&g.key(), Status::Rejected).unwrap();
+        assert_eq!(s.get(&g.key()).unwrap().unwrap().status, Status::Rejected);
+        assert_eq!(Status::parse("rejected").unwrap(), Status::Rejected);
+        assert!(s.list_open(t0()).unwrap().is_empty());
+        assert_eq!(s.list_status(Status::Rejected).unwrap().len(), 1);
+        assert!(s.list_status(Status::Resolved).unwrap().is_empty());
     }
 
     #[test]

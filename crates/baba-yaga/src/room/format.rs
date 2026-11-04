@@ -157,13 +157,36 @@ pub fn render_update(old: &FindingGroup, new: &FindingGroup) -> String {
     truncate(&format!("Update: {}.", parts.join("; ")), MAX_MESSAGE_CHARS)
 }
 
-/// Every open group, one line each, for the `status` command.
-pub fn render_status(groups: &[GroupState]) -> String {
-    if groups.is_empty() {
-        return "No open findings.".into();
+/// For the `status` command: every open group, then every rejected one,
+/// one line each with its status, cut with "more: N" to fit one message.
+pub fn render_status(open: &[GroupState], rejected: &[GroupState]) -> String {
+    let mut lines = Vec::new();
+    let mut used = 0;
+    if open.is_empty() {
+        lines.push("No open findings.".to_string());
+    } else {
+        lines.push(format!(
+            "Open findings: {}",
+            count(open.len(), "package", "packages")
+        ));
     }
-    let mut lines = vec![format!("Open findings: {} packages", groups.len())];
-    let mut used = lines[0].len();
+    used += lines[0].len();
+    let full = status_lines(open, &mut lines, &mut used);
+    if !rejected.is_empty() && full {
+        let header = format!("Rejected: {}", count(rejected.len(), "package", "packages"));
+        if used + header.len() + 1 + 20 <= MAX_MESSAGE_CHARS {
+            used += header.len() + 1;
+            lines.push(header);
+            status_lines(rejected, &mut lines, &mut used);
+        } else {
+            lines.push(format!("more: {} rejected", rejected.len()));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Append one line per group while they fit. False when cut short.
+fn status_lines(groups: &[GroupState], lines: &mut Vec<String>, used: &mut usize) -> bool {
     for (i, g) in groups.iter().enumerate() {
         let line = format!(
             "{} / {} {}: {}, {}, {}, fix {}",
@@ -176,14 +199,14 @@ pub fn render_status(groups: &[GroupState]) -> String {
             fix(&g.group)
         );
         // Room for this line plus a possible "more" line.
-        if used + line.len() + 1 + 20 > MAX_MESSAGE_CHARS {
+        if *used + line.len() + 1 + 20 > MAX_MESSAGE_CHARS {
             lines.push(format!("more: {}", groups.len() - i));
-            break;
+            return false;
         }
-        used += line.len() + 1;
+        *used += line.len() + 1;
         lines.push(line);
     }
-    lines.join("\n")
+    true
 }
 
 pub fn render_help() -> String {
@@ -225,6 +248,7 @@ pub fn truncate(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
     use crate::scanner::{group, Finding};
+    use crate::state::Status;
 
     fn finding(id: &str, score: f32, summary: &str) -> Finding {
         Finding {
@@ -262,6 +286,37 @@ mod tests {
              - GHSA-a (HIGH 7.5): Server-Side Request Forgery\n\
              - GHSA-b (MEDIUM 5.3): Inefficient Regular Expression"
         );
+    }
+
+    fn stored(package: &str, status: Status) -> GroupState {
+        let mut f = finding("GHSA-a", 7.5, "s");
+        f.package = package.into();
+        let t = chrono::DateTime::UNIX_EPOCH;
+        GroupState {
+            key: format!("samples:npm:{package}"),
+            group: group(vec![f]).remove(0),
+            thread_id: None,
+            status,
+            snoozed_until: None,
+            first_seen: t,
+            last_seen: t,
+            last_posted: None,
+            hint_posted: true,
+        }
+    }
+
+    #[test]
+    fn status_lists_open_then_rejected() {
+        let open = [stored("axios", Status::Open)];
+        let rejected = [stored("lodash", Status::Rejected)];
+        assert_eq!(
+            render_status(&open, &rejected),
+            "Open findings: 1 package\n\
+             samples / axios 0.21.1: open, 1 advisory, HIGH 7.5, fix 1.18.0\n\
+             Rejected: 1 package\n\
+             samples / lodash 0.21.1: rejected, 1 advisory, HIGH 7.5, fix 1.18.0"
+        );
+        assert_eq!(render_status(&[], &[]), "No open findings.");
     }
 
     #[test]

@@ -112,6 +112,7 @@ pub struct Summary {
     pub unchanged: usize,
     pub snoozed: usize,
     pub resolved: usize,
+    pub rejected: usize,
     pub failed_repos: usize,
 }
 
@@ -119,14 +120,15 @@ impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} packages with findings: {} new threads, {} hints, {} updates, {} unchanged, {} snoozed, {} resolved",
+            "{} packages with findings: {} new threads, {} hints, {} updates, {} unchanged, {} snoozed, {} resolved, {} rejected",
             self.groups,
             self.new_threads,
             self.hints,
             self.updates,
             self.unchanged,
             self.snoozed,
-            self.resolved
+            self.resolved,
+            self.rejected
         )?;
         if self.failed_repos > 0 {
             write!(f, ", {} repos failed to scan", self.failed_repos)?;
@@ -163,7 +165,7 @@ pub async fn scan_groups(
 /// Post every group that needs it and record it in `state` (if any):
 /// a new group gets a root message and the command hint as its first reply,
 /// a changed group gets a one-line update in its thread, snoozed and
-/// resolved groups are skipped. A thread from before hints existed gets its
+/// resolved and rejected groups are skipped. A thread from before hints existed gets its
 /// hint once; the root is never posted again.
 pub(crate) async fn publish<P: RoomPoster>(
     groups: &[FindingGroup],
@@ -188,8 +190,12 @@ pub(crate) async fn publish<P: RoomPoster>(
                 state.map(record).transpose()?;
                 continue;
             }
-            if ex.status == Status::Resolved {
-                summary.resolved += 1;
+            match ex.status {
+                Status::Resolved => summary.resolved += 1,
+                Status::Rejected => summary.rejected += 1,
+                _ => {}
+            }
+            if matches!(ex.status, Status::Resolved | Status::Rejected) {
                 state.map(record).transpose()?;
                 continue;
             }
@@ -415,7 +421,7 @@ impl Agent<'_> {
                         text
                     }
                     Command::Reject => {
-                        self.state.set_status(&g.key, Status::Resolved)?;
+                        self.state.set_status(&g.key, Status::Rejected)?;
                         self.record(&g.key, "rejected", &who).await?;
                         format!("Rejected by {who}; closing this finding.")
                     }
@@ -429,7 +435,10 @@ impl Agent<'_> {
                     _ => unreachable!("outer match limits the command"),
                 }
             }
-            Command::Status => format::render_status(&self.state.list_open(Utc::now())?),
+            Command::Status => format::render_status(
+                &self.state.list_open(Utc::now())?,
+                &self.state.list_status(Status::Rejected)?,
+            ),
             Command::Scan { repo } => {
                 self.reply(thread, "Scanning now.").await?;
                 match self.scan_and_post(repo.as_deref()).await {
