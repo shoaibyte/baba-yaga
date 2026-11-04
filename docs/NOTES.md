@@ -5,3 +5,7 @@
 - Sequence numbers exceed 2^53 (e.g. 9007194959773696 = 2^53 - 2^32): they are packed values, not counters. Keep them u64, never route them through f64 or JSON-in-JS, and never compute `cursor + 1`.
 - The client pong is the flat `{"type":"pong","cursor":N}`, not the server's event envelope; switch-core 0.31 accepts it (40 s+ with no eviction).
 - The Switch server runs on localhost, so turning Wi-Fi off does not drop the agent's socket. To test reconnect, pause the process (`kill -STOP` / `kill -CONT`) or restart switch-core.
+- An agent does not receive its own posts as events (POST /message from baba_yaga never reached baba_yaga's socket, though `read_context` shows it).
+- The `event_id` returned by POST /agents/{id}/message is the room message id (`sw_…`), the same id `read_context` lists, so it can be passed as `thread_id`.
+- When no client is connected, Switch answers an addressed message with an auto-reply ("I'm currently offline …") posted as a thread reply to that message.
+- Threads: the `post_message` and `send_targeted_message` ops take an optional `thread_id` (any message id in the thread; normalised to the root). Room documents: `content` max 1 MiB.
