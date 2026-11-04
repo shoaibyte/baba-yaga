@@ -28,6 +28,10 @@ const DEFAULT_HEARTBEAT: Duration = Duration::from_secs(2);
 /// With no frame for this many heartbeat intervals the socket is treated as
 /// dead. A silently dropped network never delivers a close frame.
 const IDLE_HEARTBEATS: f64 = 5.0;
+/// Consecutive 4409 closes tolerated before giving up. A claim left by a
+/// previous process lapses after the 6 s heartbeat TTL; backoff 1+2+4+8 s
+/// between the first five covers that comfortably.
+const MAX_CONFLICTS: u32 = 5;
 /// Floor for the idle timeout, so a very short heartbeat does not cause
 /// reconnects on a briefly busy machine.
 const MIN_IDLE: Duration = Duration::from_secs(10);
@@ -145,6 +149,8 @@ async fn run(
 ) -> Result<(), Error> {
     let mut resume = Resume::default();
     let mut backoff = Backoff::default();
+    // Consecutive sessions that ended in 4409; any other end resets it.
+    let mut conflicts = 0u32;
     loop {
         let end = session(
             &cfg,
@@ -169,7 +175,12 @@ async fn run(
                 return Err(e);
             }
             SessionEnd::Closed { code, evicted, why } => {
-                match after_close(code, evicted.as_ref()) {
+                if code == Some(close_code::CONFLICT) && evicted.is_none() {
+                    conflicts += 1;
+                } else {
+                    conflicts = 0;
+                }
+                match after_close(code, evicted.as_ref(), conflicts) {
                     Decision::Reconnect => why,
                     Decision::Stop(e) => {
                         tracing::error!(%connection_id, error = %e, "connection stopped");
@@ -328,8 +339,15 @@ async fn session(
                 return closed(None, Some(e), why);
             }
             Frame::Control(ControlFrame::Refused(r)) => {
+                let code = close_code::for_refusal(r.status);
+                tracing::warn!(%connection_id, code, detail = %r.detail, "refused");
+                // A conflict may be a previous process's claim that has not
+                // lapsed yet; let `after_close` count and retry it.
+                if code == close_code::CONFLICT {
+                    return closed(Some(code), None, format!("refused {code}: {}", r.detail));
+                }
                 return SessionEnd::Stop(Error::Refused {
-                    code: close_code::for_refusal(r.status),
+                    code,
                     reason: r.detail,
                 });
             }
@@ -414,8 +432,14 @@ pub(crate) enum Decision {
 /// What to do after a session ends. An `evicted` frame, when one arrived,
 /// decides on its own: the close that follows it (normally 1000) adds
 /// nothing. Without one, the close code decides; no code at all means the
-/// network or the server went away, so reconnect.
-pub(crate) fn after_close(code: Option<u16>, last_evicted: Option<&Evicted>) -> Decision {
+/// network or the server went away, so reconnect. `conflicts` is the number
+/// of consecutive sessions, this one included, that ended in 4409: the first
+/// `MAX_CONFLICTS - 1` are retried, the next one stops.
+pub(crate) fn after_close(
+    code: Option<u16>,
+    last_evicted: Option<&Evicted>,
+    conflicts: u32,
+) -> Decision {
     if let Some(e) = last_evicted {
         return match e.code.as_str() {
             "heartbeat_lapsed" | "no_stream" | "unfenced" | "connection_error" => {
@@ -439,6 +463,7 @@ pub(crate) fn after_close(code: Option<u16>, last_evicted: Option<&Evicted>) -> 
         Some(close_code::UNAUTHORIZED) => {
             Decision::Stop(Error::Auth("socket closed with 4401".into()))
         }
+        Some(close_code::CONFLICT) if conflicts < MAX_CONFLICTS => Decision::Reconnect,
         Some(c @ (close_code::BAD_REQUEST | close_code::FORBIDDEN | close_code::CONFLICT)) => {
             Decision::Stop(Error::Refused {
                 code: c,
@@ -490,23 +515,29 @@ mod tests {
 
     #[test]
     fn service_restart_and_server_error_reconnect() {
-        assert!(matches!(after_close(Some(1012), None), Decision::Reconnect));
-        assert!(matches!(after_close(Some(1011), None), Decision::Reconnect));
-        assert!(matches!(after_close(None, None), Decision::Reconnect));
+        assert!(matches!(
+            after_close(Some(1012), None, 0),
+            Decision::Reconnect
+        ));
+        assert!(matches!(
+            after_close(Some(1011), None, 0),
+            Decision::Reconnect
+        ));
+        assert!(matches!(after_close(None, None, 0), Decision::Reconnect));
     }
 
     #[test]
     fn unauthorized_stops_with_auth() {
         assert!(matches!(
-            after_close(Some(4401), None),
+            after_close(Some(4401), None, 0),
             Decision::Stop(Error::Auth(_))
         ));
     }
 
     #[test]
-    fn conflict_and_bad_request_stop_with_refused() {
-        for c in [4400, 4403, 4409] {
-            match after_close(Some(c), None) {
+    fn bad_request_and_forbidden_stop_with_refused() {
+        for c in [4400, 4403] {
+            match after_close(Some(c), None, 0) {
                 Decision::Stop(Error::Refused { code, .. }) => assert_eq!(code, c),
                 other => panic!("{c}: expected refused, got {other:?}"),
             }
@@ -514,9 +545,23 @@ mod tests {
     }
 
     #[test]
+    fn conflict_retries_four_times_then_stops_on_the_fifth() {
+        for n in 1..MAX_CONFLICTS {
+            assert!(
+                matches!(after_close(Some(4409), None, n), Decision::Reconnect),
+                "conflict {n} should retry"
+            );
+        }
+        match after_close(Some(4409), None, MAX_CONFLICTS) {
+            Decision::Stop(Error::Refused { code, .. }) => assert_eq!(code, 4409),
+            other => panic!("expected refused after {MAX_CONFLICTS} conflicts, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn taken_over_stops_even_after_normal_close() {
         let e = evicted("taken_over", Some("another open took the connection"));
-        match after_close(Some(1000), Some(&e)) {
+        match after_close(Some(1000), Some(&e), 0) {
             Decision::Stop(Error::Evicted { reason }) => assert_eq!(reason, "taken_over"),
             other => panic!("expected evicted stop, got {other:?}"),
         }
@@ -525,7 +570,7 @@ mod tests {
     #[test]
     fn closed_eviction_carries_reason() {
         let e = evicted("closed", Some("agent deleted"));
-        match after_close(Some(1000), Some(&e)) {
+        match after_close(Some(1000), Some(&e), 0) {
             Decision::Stop(Error::Evicted { reason }) => {
                 assert_eq!(reason, "closed: agent deleted")
             }
@@ -544,7 +589,7 @@ mod tests {
         ] {
             let e = evicted(code, None);
             assert!(
-                matches!(after_close(Some(1000), Some(&e)), Decision::Reconnect),
+                matches!(after_close(Some(1000), Some(&e), 0), Decision::Reconnect),
                 "{code}"
             );
         }

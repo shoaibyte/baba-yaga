@@ -23,7 +23,7 @@ The task keeps three values for its whole life. They let a new socket continue w
 - **domain event**: set the cursor to its id, then put it on the channel. If the application has dropped its receiver, nobody is listening any more, so the task closes the socket and stops cleanly.
 - **gap**: the server has lost some events (retention, for example). The task logs a warning and moves the cursor to `resumed_at`. Fetching the missing history is the application's job.
 - **evicted**: the server is ending this connection. The code says whether to come back (see below).
-- **refused**: the server will not open this connection at all. Stop.
+- **refused**: the server will not open this connection. Stop, except for status 409, which is retried as described below.
 - **subscription_changed**, **room_released**: log them and carry on.
 - **anything unknown**: log it at debug level and carry on, so a newer server cannot break the client.
 
@@ -41,7 +41,8 @@ If an `evicted` frame arrived, its code decides, and the close that follows does
 With no eviction, the close code decides:
 
 - 4401: the key is wrong. Stop with an auth error.
-- 4400, 4403, 4409: bad request, room not allowed, or conflict. Stop with a refusal.
+- 4400, 4403: bad request or room not allowed. Stop with a refusal.
+- 4409 (conflict, often "room already claimed"): retry with backoff. A process that has just restarted can find its old claim still alive; that claim lapses after the 6-second heartbeat TTL, and the backoff of 1, 2, 4 and 8 seconds outlasts it. After five 4409s in a row, stop with a refusal. A `refused` frame with status 409 counts the same way.
 - 1011, 1012, any other code, or no close frame at all (network drop, server crash): reconnect.
 
 A network that disappears silently never sends a close frame. So if no frame at all arrives for five heartbeat intervals (at least 10 seconds), the task treats the socket as dead and reconnects.
