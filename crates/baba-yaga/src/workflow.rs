@@ -56,9 +56,6 @@ impl SwitchEnv {
 // ---------------------------------------------------------------------------
 
 /// Where group posts go.
-// `Http` and `DryRun` are used by `report`, the next commit; remove this
-// allow there.
-#[allow(dead_code)]
 pub enum Poster<'a> {
     /// Over the live connection: top-level posts and thread replies.
     Live(&'a Client),
@@ -478,9 +475,59 @@ fn fmt_time(t: DateTime<Utc>) -> String {
     t.format("%Y-%m-%d %H:%M UTC").to_string()
 }
 
-/// Post a status report of open findings to the room once and exit.
-pub async fn report(_config: &Config) -> Result<()> {
-    todo!("post a summary of State::list_open to the room")
+// ---------------------------------------------------------------------------
+// report
+// ---------------------------------------------------------------------------
+
+pub struct ReportOptions {
+    pub repos: Vec<Repo>,
+    pub min_severity: Option<f32>,
+    pub call_analysis: bool,
+    /// Fallback when `SWITCH_ROOM_ID` is not set.
+    pub config_room: Option<String>,
+    /// `None`: post every group as a new thread and remember nothing.
+    pub state_path: Option<std::path::PathBuf>,
+    pub dry_run: bool,
+}
+
+/// Scan once and post over HTTP, without a socket, then exit. With state,
+/// groups already posted are skipped, and changed ones are left unrecorded
+/// so `serve` posts the update in their thread.
+pub async fn report(opts: ReportOptions) -> Result<()> {
+    let state = opts.state_path.as_deref().map(State::open).transpose()?;
+    let env;
+    let http;
+    let poster = if opts.dry_run {
+        Poster::DryRun
+    } else {
+        env = SwitchEnv::load(opts.config_room.as_deref())?;
+        http = Http::new(env.url.clone());
+        http.health()
+            .await
+            .with_context(|| format!("GET /health failed on {}", env.url))?;
+        Poster::Http {
+            http: &http,
+            env: &env,
+        }
+    };
+    let now = Utc::now();
+    if let Some(s) = &state {
+        s.reopen_expired(now)?;
+    }
+    let mut summary = Summary::default();
+    let groups = scan_groups(
+        &opts.repos,
+        opts.min_severity,
+        opts.call_analysis,
+        &mut summary,
+    )
+    .await?;
+    publish(&groups, state.as_ref(), &poster, now, &mut summary).await?;
+    tracing::info!(%summary, "report finished");
+    if summary.failed_repos > 0 {
+        bail!("{} repos failed to scan", summary.failed_repos);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
