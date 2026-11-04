@@ -291,8 +291,8 @@ pub async fn serve(cfg: &Config) -> Result<()> {
     agent
         .client
         .post(&format!(
-            "Baba-Yaga online. Watching {} repos. Next scan: {}.",
-            cfg.repos.len(),
+            "Baba-Yaga online. Watching {}. Next scan: {}.",
+            format::count(cfg.repos.len(), "repo", "repos"),
             fmt_time(next_tick(&schedule)?)
         ))
         .await?;

@@ -198,12 +198,17 @@ pub fn render_help() -> String {
     )
 }
 
-fn advisories(n: usize) -> String {
+/// `1 repo`, `2 repos`.
+pub fn count(n: usize, one: &str, many: &str) -> String {
     if n == 1 {
-        "1 advisory".into()
+        format!("1 {one}")
     } else {
-        format!("{n} advisories")
+        format!("{n} {many}")
     }
+}
+
+fn advisories(n: usize) -> String {
+    count(n, "advisory", "advisories")
 }
 
 /// At most `max` characters, ending in "..." when cut. Cuts on a char
@@ -257,6 +262,13 @@ mod tests {
              - GHSA-a (HIGH 7.5): Server-Side Request Forgery\n\
              - GHSA-b (MEDIUM 5.3): Inefficient Regular Expression"
         );
+    }
+
+    #[test]
+    fn count_is_singular_only_for_one() {
+        assert_eq!(count(0, "repo", "repos"), "0 repos");
+        assert_eq!(count(1, "repo", "repos"), "1 repo");
+        assert_eq!(count(2, "repo", "repos"), "2 repos");
     }
 
     #[test]
