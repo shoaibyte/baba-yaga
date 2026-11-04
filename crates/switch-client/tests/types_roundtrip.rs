@@ -295,3 +295,54 @@ fn post_message_response_observed_shape() {
     assert_eq!(resp.event_id, "sw_01d31d8ec85342ffa2e078e87db2d211");
     assert!(resp.ok);
 }
+
+// Observed op results, switch-core 0.31 (ids shortened where long).
+#[test]
+fn op_results_observed() {
+    let e: switch_client::EventId =
+        serde_json::from_str(r#"{"event_id":"sw_0c4781ba8871437a895e2454907f66d3"}"#).unwrap();
+    assert!(e.event_id.starts_with("sw_"));
+
+    let d: switch_client::DocumentId =
+        serde_json::from_str(r#"{"document_id":"5374a4c7-0b79-46c2-b4c4-e5d428b53cf0"}"#).unwrap();
+    assert_eq!(d.document_id, "5374a4c7-0b79-46c2-b4c4-e5d428b53cf0");
+
+    let u: switch_client::DocumentStatus = serde_json::from_str(
+        r#"{"document_id":"5374a4c7-0b79-46c2-b4c4-e5d428b53cf0","status":"ok"}"#,
+    )
+    .unwrap();
+    assert_eq!(u.status, "ok");
+
+    let p: Vec<switch_client::Participant> = serde_json::from_str(
+        r#"[{"alias":null,"id":"5742bb2a-e565-4e88-a19c-e43ea1a2125a","name":"baba_yaga","status":"live","type":"agent"},{"alias":null,"id":"e09a1ed5-3ee7-4516-bc0c-37c8b8a7078e","name":"shoaib2933","status":null,"type":"user"}]"#,
+    )
+    .unwrap();
+    assert_eq!(p.len(), 2);
+    assert_eq!(
+        (p[0].name.as_str(), p[0].kind.as_str()),
+        ("baba_yaga", "agent")
+    );
+    assert_eq!(p[0].status.as_deref(), Some("live"));
+    assert_eq!(p[1].kind, "user");
+    assert_eq!(p[1].status, None);
+}
+
+#[test]
+fn read_context_observed() {
+    let json = r#"{"threads":[
+        {"root":{"attachments":[],"body":"[probe] stage 3: thread root","id":"sw_b21a","kind":"message","sender":"@switch-agent-45540906:localhost","sender_name":"baba_yaga","timestamp":1793805935600},
+         "replies":[{"attachments":[],"body":"[probe] stage 3: reply via op","id":"sw_0c47","kind":"message","sender":"@switch-agent-45540906:localhost","sender_name":"baba_yaga","timestamp":1793805935700}]},
+        {"root":{"attachments":[],"body":"[probe] stage 3: reply via /message","id":"sw_9a5c","kind":"message","sender":"@switch-agent-45540906:localhost","sender_name":"baba_yaga","timestamp":1793805935737},"replies":[]}],
+        "truncated":true,"oldest_timestamp":1793800261539}"#;
+    let ctx: switch_client::Context = serde_json::from_str(json).unwrap();
+    assert!(ctx.truncated);
+    assert_eq!(ctx.oldest_timestamp, Some(1_793_800_261_539));
+    assert_eq!(ctx.threads.len(), 2);
+    assert_eq!(ctx.threads[0].root.id, "sw_b21a");
+    assert_eq!(
+        ctx.threads[0].replies[0].body,
+        "[probe] stage 3: reply via op"
+    );
+    assert!(ctx.threads[1].replies.is_empty());
+    assert_eq!(ctx.threads[1].root.kind, "message");
+}

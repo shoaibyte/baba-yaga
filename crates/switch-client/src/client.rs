@@ -11,7 +11,10 @@ use uuid::Uuid;
 
 use crate::error::Error;
 use crate::http::Http;
-use crate::types::{DomainEvent, PostMessageResponse};
+use crate::types::{
+    Context, DocumentId, DocumentStatus, DomainEvent, EventId, NewDocument, Participant,
+    PostMessageResponse,
+};
 use crate::ws::{self, ConnectionHandle, WsConfig};
 
 /// Room for events the application has not read yet. When it is full the
@@ -81,6 +84,72 @@ impl Client {
     pub async fn post(&self, content: &str) -> Result<PostMessageResponse, Error> {
         self.http
             .post_message(&self.agent_key, &self.agent_id, &self.room_id, content)
+            .await
+    }
+
+    /// Reply inside the thread containing message `thread_id`, in the
+    /// configured room. Needs the socket to be connected.
+    pub async fn post_in_thread(&self, thread_id: &str, content: &str) -> Result<EventId, Error> {
+        self.http
+            .post_in_thread(
+                &self.agent_key,
+                &self.agent_id,
+                self.connection_id(),
+                thread_id,
+                content,
+            )
+            .await
+    }
+
+    pub async fn create_document(&self, doc: &NewDocument) -> Result<DocumentId, Error> {
+        self.http
+            .create_document(&self.agent_key, &self.agent_id, self.connection_id(), doc)
+            .await
+    }
+
+    pub async fn update_document(
+        &self,
+        document_id: &str,
+        content: &str,
+    ) -> Result<DocumentStatus, Error> {
+        self.http
+            .update_document(
+                &self.agent_key,
+                &self.agent_id,
+                self.connection_id(),
+                document_id,
+                content,
+            )
+            .await
+    }
+
+    pub async fn delete_document(&self, document_id: &str) -> Result<DocumentStatus, Error> {
+        self.http
+            .delete_document(
+                &self.agent_key,
+                &self.agent_id,
+                self.connection_id(),
+                document_id,
+            )
+            .await
+    }
+
+    /// The configured room's timeline, at most `limit` entries.
+    pub async fn read_context(&self, limit: u32) -> Result<Context, Error> {
+        self.http
+            .read_context(
+                &self.agent_key,
+                &self.agent_id,
+                self.connection_id(),
+                Some(&self.room_id),
+                limit,
+            )
+            .await
+    }
+
+    pub async fn list_participants(&self) -> Result<Vec<Participant>, Error> {
+        self.http
+            .list_participants(&self.agent_key, &self.agent_id, self.connection_id())
             .await
     }
 

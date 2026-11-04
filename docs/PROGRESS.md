@@ -26,3 +26,19 @@ Messages posted this stage: 1.
 
 ### Needs human (Stage 2)
 - Run `cargo run --example echo`, send `@baba_yaga ping` from Discord, expect "pong". Then pause it (`kill -STOP`, 20 s, `kill -CONT`) and ping during the pause; expect "pong" after resume. This is the only test of catch-up via `start_from`, because a cursor of 0 in my run means nothing was delivered to resume from.
+
+## 2026-11-04 16:25 to 16:32 Stage 3
+
+- Added `Http::list_ops` and `ConnectionHandle::wait_connected` / `Client::wait_connected`. Ops bound to the connection fail until `connection_state` has arrived, so callers wait first.
+- `examples/ops_probe.rs` run twice (16:25 raw JSON, 16:31 typed methods). Both runs:
+  - 57 operations listed. `post_message` op: `{body, thread_id?}`. `send_targeted_message`: `{body, target_names?, target_roles?, thread_id?}`. `create_room_document`: `{name, description, instructions, content}` (content max 1 MiB). `update_room_document`: `{document_id, name?, description?, instructions?, content?}`. `read_context`: `{limit=50, since?, before?, room_id?}`. `list_participants`: no arguments.
+  - Thread reply via the op: landed in the thread (`read_context` shows it under the root's replies).
+  - Thread reply via POST /message with `thread_id`: 200 OK, but posted as a new top-level message. Field ignored.
+  - Document create, update and delete all succeeded; the probe deletes its own document, so none is left behind.
+  - Participants: baba_yaga (agent, live), shoaib2933 (user).
+- `post_in_thread` uses the op, so no "re: <thread_id>" fallback was needed.
+- Added typed methods on Http and Client: `post_in_thread`, `create_document`, `update_document`, `delete_document`, `read_context`, `list_participants`, with result types `EventId`, `DocumentId`, `DocumentStatus`, `Participant`, `Context`. Tests use the observed JSON.
+- Deviation: the spec had `post_in_thread(room_id, thread_id, content)`. The op has no room argument (it posts to the connection's room), so `Http::post_in_thread` takes the connection id and `Client::post_in_thread` uses the client's room.
+- Consequence for Stage 4: `report` needs a socket for thread replies. Decision below in the Stage 4 entry.
+
+Messages posted this stage: 6 (two runs, three "[probe]" messages each). Room documents left behind: none.

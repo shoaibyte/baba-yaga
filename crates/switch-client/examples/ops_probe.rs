@@ -2,11 +2,14 @@
 //! replies (op and plain route), room documents and participants. Every step
 //! prints its result and carries on when one fails. Posts three "[probe]"
 //! messages and deletes the probe document it creates.
+//!
+//! Observed on switch-core 0.31: the `post_message` op with `thread_id`
+//! replies in the thread; `POST /message` ignores `thread_id`.
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
-use switch_client::{Client, Error};
+use serde_json::json;
+use switch_client::{Client, NewDocument};
 
 const SHOWN_OPS: [&str; 6] = [
     "post_message",
@@ -50,15 +53,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = client.post("[probe] stage 3: thread root").await?;
     println!("ROOT event_id={}", root.event_id);
 
-    // (c) Two ways to reply in its thread.
-    let via_op: Result<Value, Error> = client
-        .op(
-            "post_message",
-            json!({"body": "[probe] stage 3: reply via op", "thread_id": root.event_id}),
-        )
-        .await;
-    show("REPLY_OP", &via_op);
-
+    // (c) Two ways to reply in its thread. Only the op works (observed);
+    // the route is kept to notice if that changes.
+    match client
+        .post_in_thread(&root.event_id, "[probe] stage 3: reply via op")
+        .await
+    {
+        Ok(r) => println!("REPLY_OP ok event_id={}", r.event_id),
+        Err(e) => println!("REPLY_OP error: {e}"),
+    }
     let via_route = reqwest::Client::new()
         .post(format!(
             "{}/agents/{}/message",
@@ -81,76 +84,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Where did the replies land? A reply in the thread shows up in the
     // root's `replies`; one that ignored thread_id shows up as its own root.
-    let ctx: Result<Value, Error> = client.op("read_context", json!({"limit": 10})).await;
-    match &ctx {
+    match client.read_context(10).await {
         Ok(ctx) => {
-            for t in ctx["threads"].as_array().into_iter().flatten() {
-                let id = t["root"]["id"].as_str().unwrap_or_default();
-                let body = t["root"]["body"].as_str().unwrap_or_default();
-                if !body.starts_with("[probe] stage 3") {
-                    continue;
-                }
-                let replies: Vec<&str> = t["replies"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|r| r["body"].as_str())
-                    .collect();
-                println!("THREAD root={id} body={body:?} replies={replies:?}");
-            }
-            if let Some(first) = ctx["threads"].as_array().and_then(|a| a.last()) {
-                println!("CONTEXT_ENTRY {}", first["root"]);
+            for t in ctx
+                .threads
+                .iter()
+                .filter(|t| t.root.body.starts_with("[probe] stage 3"))
+            {
+                let replies: Vec<&str> = t.replies.iter().map(|r| r.body.as_str()).collect();
+                println!(
+                    "THREAD root={} body={:?} replies={replies:?}",
+                    t.root.id, t.root.body
+                );
             }
             println!(
-                "CONTEXT truncated={} oldest_timestamp={}",
-                ctx["truncated"], ctx["oldest_timestamp"]
+                "CONTEXT threads={} truncated={} oldest_timestamp={:?}",
+                ctx.threads.len(),
+                ctx.truncated,
+                ctx.oldest_timestamp
             );
         }
         Err(e) => println!("CONTEXT error: {e}"),
     }
 
     // (d) A room document, updated once, then deleted again.
-    let created: Result<Value, Error> = client
-        .op(
-            "create_room_document",
-            json!({
-                "name": "baba-yaga-probe",
-                "description": "Probe document, safe to delete",
-                "instructions": "Created by the baba-yaga ops probe; ignore it.",
-                "content": "probe",
-            }),
-        )
-        .await;
-    show("DOC_CREATE", &created);
-    if let Ok(doc) = &created {
-        if let Some(id) = doc["document_id"].as_str() {
-            let updated: Result<Value, Error> = client
-                .op(
-                    "update_room_document",
-                    json!({"document_id": id, "content": "probe 2"}),
-                )
-                .await;
-            show("DOC_UPDATE", &updated);
-            let loaded: Result<Value, Error> =
-                client.op("load_internal_documents", json!({})).await;
-            show("DOC_LOAD", &loaded);
-            let deleted: Result<Value, Error> = client
-                .op("delete_room_document", json!({"document_id": id}))
-                .await;
-            show("DOC_DELETE", &deleted);
+    let doc = NewDocument {
+        name: "baba-yaga-probe".into(),
+        description: "Probe document, safe to delete".into(),
+        instructions: "Created by the baba-yaga ops probe; ignore it.".into(),
+        content: "probe".into(),
+    };
+    match client.create_document(&doc).await {
+        Ok(created) => {
+            println!("DOC_CREATE ok document_id={}", created.document_id);
+            match client
+                .update_document(&created.document_id, "probe 2")
+                .await
+            {
+                Ok(u) => println!("DOC_UPDATE ok status={}", u.status),
+                Err(e) => println!("DOC_UPDATE error: {e}"),
+            }
+            match client.delete_document(&created.document_id).await {
+                Ok(d) => println!("DOC_DELETE ok status={}", d.status),
+                Err(e) => println!("DOC_DELETE error: {e}"),
+            }
         }
+        Err(e) => println!("DOC_CREATE error: {e}"),
     }
 
-    let participants: Result<Value, Error> = client.op("list_participants", json!({})).await;
-    show("PARTICIPANTS", &participants);
+    match client.list_participants().await {
+        Ok(ps) => {
+            for p in ps {
+                println!(
+                    "PARTICIPANT name={} type={} status={:?}",
+                    p.name, p.kind, p.status
+                );
+            }
+        }
+        Err(e) => println!("PARTICIPANTS error: {e}"),
+    }
 
     client.shutdown().await?;
     Ok(())
-}
-
-fn show(label: &str, r: &Result<Value, Error>) {
-    match r {
-        Ok(v) => println!("{label} ok {v}"),
-        Err(e) => println!("{label} error: {e}"),
-    }
 }

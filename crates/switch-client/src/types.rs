@@ -89,6 +89,103 @@ pub struct PostMessageResponse {
     pub ok: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Operation results (observed on switch-core 0.31)
+// ---------------------------------------------------------------------------
+
+/// Result of the `post_message` and `send_targeted_message` ops:
+/// `{"event_id": "sw_..."}`. The id is the room message id, usable as a
+/// `thread_id`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EventId {
+    pub event_id: String,
+}
+
+/// `content` limit of a room document, from the `create_room_document`
+/// schema ("max 1 MiB").
+pub const MAX_DOCUMENT_BYTES: usize = 1 << 20;
+
+/// Arguments of `create_room_document`. All four are required by the schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewDocument {
+    /// Unique within the room.
+    pub name: String,
+    pub description: String,
+    /// Agent-facing notes on when to use the document.
+    pub instructions: String,
+    /// At most [`MAX_DOCUMENT_BYTES`].
+    pub content: String,
+}
+
+/// Result of `create_room_document`: `{"document_id": "<uuid>"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentId {
+    pub document_id: String,
+}
+
+/// Result of `update_room_document` and `delete_room_document`:
+/// `{"document_id": "<uuid>", "status": "ok"}`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentStatus {
+    pub document_id: String,
+    pub status: String,
+}
+
+/// One entry of `list_participants`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Participant {
+    pub id: String,
+    /// The name to address with `@name` and to pass to `send_targeted_message`.
+    pub name: String,
+    /// `agent` or `user` (observed).
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// Observed `live` for a connected agent, null for a user.
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default)]
+    pub alias: Option<String>,
+}
+
+/// Result of `read_context`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Context {
+    /// Ordered by latest activity, freshest last.
+    #[serde(default)]
+    pub threads: Vec<ContextThread>,
+    /// True when older history exists that this read did not reach.
+    #[serde(default)]
+    pub truncated: bool,
+    /// Epoch milliseconds.
+    #[serde(default)]
+    pub oldest_timestamp: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextThread {
+    pub root: ContextEntry,
+    /// Oldest first.
+    #[serde(default)]
+    pub replies: Vec<ContextEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextEntry {
+    /// Room message id (`sw_...`); pass as `thread_id` to reply.
+    pub id: String,
+    /// `message` or `room_join`.
+    pub kind: String,
+    pub sender: String,
+    #[serde(default)]
+    pub sender_name: Option<String>,
+    #[serde(default)]
+    pub body: String,
+    /// Epoch milliseconds.
+    pub timestamp: i64,
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
+}
+
 /// Who may address the agent, set through the `update_agent_detail` operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

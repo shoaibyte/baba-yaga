@@ -9,7 +9,10 @@ use url::Url;
 use uuid::Uuid;
 
 use crate::error::Error;
-use crate::types::{Addressing, PostMessageResponse, RegisterRequest, RegisterResponse};
+use crate::types::{
+    Addressing, Context, DocumentId, DocumentStatus, EventId, NewDocument, Participant,
+    PostMessageResponse, RegisterRequest, RegisterResponse, MAX_DOCUMENT_BYTES,
+};
 
 const CONNECTION_ID_HEADER: &str = "X-Switch-Connection-Id";
 /// Per-request limit for `Http::new`, so a bridge that accepts the
@@ -128,6 +131,131 @@ impl Http {
         Ok(wrapped.result)
     }
 
+    /// Reply inside a thread through the `post_message` op. `thread_id` is
+    /// any message id in the thread. Needs a live connection: the op posts to
+    /// the connection's room. `POST /message` ignores `thread_id` (observed),
+    /// so there is no connectionless way to reply in a thread.
+    pub async fn post_in_thread(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+        thread_id: &str,
+        content: &str,
+    ) -> Result<EventId, Error> {
+        let args = json!({ "body": content, "thread_id": thread_id });
+        self.call_op(
+            agent_key,
+            agent_id,
+            "post_message",
+            args,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    /// `create_room_document` in the connection's room. Fails before the call
+    /// when `content` is over the 1 MiB cap.
+    pub async fn create_document(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+        doc: &NewDocument,
+    ) -> Result<DocumentId, Error> {
+        check_document_size(&doc.content)?;
+        let args = serde_json::to_value(doc)?;
+        self.call_op(
+            agent_key,
+            agent_id,
+            "create_room_document",
+            args,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    /// Replace the content of a document this agent created.
+    pub async fn update_document(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+        document_id: &str,
+        content: &str,
+    ) -> Result<DocumentStatus, Error> {
+        check_document_size(content)?;
+        let args = json!({ "document_id": document_id, "content": content });
+        self.call_op(
+            agent_key,
+            agent_id,
+            "update_room_document",
+            args,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    /// Delete a document this agent created.
+    pub async fn delete_document(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+        document_id: &str,
+    ) -> Result<DocumentStatus, Error> {
+        let args = json!({ "document_id": document_id });
+        self.call_op(
+            agent_key,
+            agent_id,
+            "delete_room_document",
+            args,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    /// The room timeline grouped into threads, at most `limit` entries.
+    /// `room_id` of `None` reads the connection's room.
+    pub async fn read_context(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+        room_id: Option<&str>,
+        limit: u32,
+    ) -> Result<Context, Error> {
+        let mut args = json!({ "limit": limit });
+        if let Some(room) = room_id {
+            args["room_id"] = json!(room);
+        }
+        self.call_op(
+            agent_key,
+            agent_id,
+            "read_context",
+            args,
+            Some(connection_id),
+        )
+        .await
+    }
+
+    /// Agents and users in the connection's room.
+    pub async fn list_participants(
+        &self,
+        agent_key: &str,
+        agent_id: &str,
+        connection_id: Uuid,
+    ) -> Result<Vec<Participant>, Error> {
+        self.call_op(
+            agent_key,
+            agent_id,
+            "list_participants",
+            json!({}),
+            Some(connection_id),
+        )
+        .await
+    }
+
     /// `GET /agents/{id}/ops`: the operation catalogue as returned,
     /// `{"operations": {"<name>": {"description", "input_schema"}}}`.
     pub async fn list_ops(&self, agent_key: &str, agent_id: &str) -> Result<Value, Error> {
@@ -152,6 +280,16 @@ impl Http {
             .extend(segments);
         Ok(url)
     }
+}
+
+fn check_document_size(content: &str) -> Result<(), Error> {
+    if content.len() > MAX_DOCUMENT_BYTES {
+        return Err(Error::Protocol(format!(
+            "document content is {} bytes, over the {MAX_DOCUMENT_BYTES}-byte cap",
+            content.len()
+        )));
+    }
+    Ok(())
 }
 
 /// Pass a 2xx response through; turn anything else into an error.

@@ -15,10 +15,11 @@ pub use error::Error;
 pub use http::Http;
 pub use types::{
     close_code, Addressing, Attachment, CommandPayload, ConnectOptions, ConnectionModel,
-    ConnectionState, ControlFrame, DomainEvent, EventData, EventPayload, Evicted, Filter, Frame,
-    Gap, IntegrationProfile, MessagePayload, Missed, Pong, PostMessageResponse, RawFrame, Refused,
-    RegisterRequest, RegisterResponse, RoomJoinPayload, RoomReleased, Scope, StartFrom,
-    SubscriptionChanged,
+    ConnectionState, Context, ContextEntry, ContextThread, ControlFrame, DocumentId,
+    DocumentStatus, DomainEvent, EventData, EventId, EventPayload, Evicted, Filter, Frame, Gap,
+    IntegrationProfile, MessagePayload, Missed, NewDocument, Participant, Pong,
+    PostMessageResponse, RawFrame, Refused, RegisterRequest, RegisterResponse, RoomJoinPayload,
+    RoomReleased, Scope, StartFrom, SubscriptionChanged, MAX_DOCUMENT_BYTES,
 };
 pub use ws::{ConnectionHandle, WsConfig};
 
