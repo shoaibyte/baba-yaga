@@ -9,7 +9,7 @@ use std::process::Command;
 use anyhow::{bail, Context, Result};
 
 use crate::config::Repo;
-pub use finding::Finding;
+pub use finding::{group, Finding};
 
 /// Scan one configured repository. A `url` that is a local directory is
 /// scanned in place; anything else is shallow-cloned into a temp directory.

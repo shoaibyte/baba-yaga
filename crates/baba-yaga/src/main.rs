@@ -46,6 +46,10 @@ enum Cmd {
         /// config file is then optional.
         #[arg(long)]
         path: Option<PathBuf>,
+        /// Print one entry per (repo, ecosystem, package) instead of one per
+        /// advisory.
+        #[arg(long)]
+        group: bool,
     },
 }
 
@@ -64,11 +68,16 @@ async fn main() -> Result<()> {
     match cli.command {
         Cmd::Serve => workflow::serve(&Config::load(&cli.config)?).await,
         Cmd::Report => workflow::report(&Config::load(&cli.config)?).await,
-        Cmd::Scan { repo, path } => scan(&cli.config, repo, path),
+        Cmd::Scan { repo, path, group } => scan(&cli.config, repo, path, group),
     }
 }
 
-fn scan(config_path: &std::path::Path, only: Option<String>, path: Option<PathBuf>) -> Result<()> {
+fn scan(
+    config_path: &std::path::Path,
+    only: Option<String>,
+    path: Option<PathBuf>,
+    grouped: bool,
+) -> Result<()> {
     let (repos, min_severity, call_analysis) = match path {
         Some(dir) => {
             let (min, call_analysis) = if config_path.exists() {
@@ -108,6 +117,12 @@ fn scan(config_path: &std::path::Path, only: Option<String>, path: Option<PathBu
     }
     let findings = scanner::filter_severity(findings, min_severity);
     tracing::info!(count = findings.len(), "scan finished");
-    println!("{}", serde_json::to_string_pretty(&findings)?);
+    if grouped {
+        let groups = scanner::group(findings);
+        tracing::info!(groups = groups.len(), "grouped");
+        println!("{}", serde_json::to_string_pretty(&groups)?);
+    } else {
+        println!("{}", serde_json::to_string_pretty(&findings)?);
+    }
     Ok(())
 }
