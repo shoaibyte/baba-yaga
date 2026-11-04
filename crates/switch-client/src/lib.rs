@@ -10,6 +10,7 @@ pub mod http;
 pub mod types;
 pub mod ws;
 
+pub use client::Client;
 pub use error::Error;
 pub use http::Http;
 pub use types::{
