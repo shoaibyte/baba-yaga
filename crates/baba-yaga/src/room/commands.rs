@@ -1,59 +1,95 @@
-//! Parsing room replies into commands.
+//! Parsing addressed room messages into commands.
 //!
-//! Leading mentions (`@baba-yaga`) and a leading `/` or `!` are ignored, and
-//! the verb is case-insensitive.
+//! Mentions (`@baba_yaga`) and punctuation are ignored, the verb is
+//! case-insensitive, and the first known verb anywhere in the message wins,
+//! so "please approve this" is `approve`. A negation before the verb ("don't
+//! approve") makes the message `Unknown` rather than risk acting on it.
 
-/// Days a `snooze` lasts when no count is given.
+/// Days a `snooze` lasts when no duration is given.
 pub const DEFAULT_SNOOZE_DAYS: u32 = 7;
+/// Longest snooze accepted, so a typo cannot hide a finding for years.
+pub const MAX_SNOOZE_DAYS: u32 = 365;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     Approve,
     Reject,
-    Snooze { id: String, days: u32 },
+    Snooze { days: u32 },
     Status,
     Scan { repo: Option<String> },
+    Help,
     Unknown,
 }
 
-pub fn parse(body: &str) -> Command {
-    let mut words = body
-        .split_whitespace()
-        .skip_while(|w| w.starts_with('@'))
-        .map(|w| w.trim_end_matches([',', ':']));
-    let Some(verb) = words.next() else {
-        return Command::Unknown;
-    };
-    let verb = verb.trim_start_matches(['/', '!']).to_ascii_lowercase();
-    let rest: Vec<&str> = words.collect();
+const NEGATIONS: [&str; 5] = ["not", "dont", "don't", "never", "no"];
+/// Words after `scan` that are not a repo name.
+const FILLER: [&str; 9] = [
+    "please",
+    "now",
+    "again",
+    "it",
+    "this",
+    "the",
+    "all",
+    "repos",
+    "everything",
+];
 
-    match (verb.as_str(), rest.as_slice()) {
-        ("approve", []) => Command::Approve,
-        ("reject", []) => Command::Reject,
-        ("status", []) => Command::Status,
-        ("scan", []) => Command::Scan { repo: None },
-        ("scan", [repo]) => Command::Scan {
-            repo: Some((*repo).to_string()),
-        },
-        ("snooze", [id]) => Command::Snooze {
-            id: (*id).to_string(),
-            days: DEFAULT_SNOOZE_DAYS,
-        },
-        ("snooze", [id, days]) => match parse_days(days) {
-            Some(days) => Command::Snooze {
-                id: (*id).to_string(),
-                days,
+pub fn parse(body: &str) -> Command {
+    let words: Vec<String> = body
+        .split_whitespace()
+        .filter(|w| !w.starts_with('@'))
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric() && c != '\'' && c != '-' && c != '_')
+                .trim_start_matches(['/', '!'])
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect();
+
+    for (i, word) in words.iter().enumerate() {
+        let rest = &words[i + 1..];
+        let command = match word.as_str() {
+            "approve" | "approved" | "lgtm" => Command::Approve,
+            "reject" | "rejected" => Command::Reject,
+            "snooze" => match rest.iter().find_map(|w| parse_duration(w)) {
+                Some(Ok(days)) => Command::Snooze { days },
+                Some(Err(())) => Command::Unknown,
+                None => Command::Snooze {
+                    days: DEFAULT_SNOOZE_DAYS,
+                },
             },
-            None => Command::Unknown,
-        },
-        _ => Command::Unknown,
+            "status" => Command::Status,
+            "scan" => Command::Scan {
+                repo: rest.iter().find(|w| !FILLER.contains(&w.as_str())).cloned(),
+            },
+            "help" | "commands" => Command::Help,
+            _ => continue,
+        };
+        if words[..i].iter().any(|w| NEGATIONS.contains(&w.as_str())) {
+            return Command::Unknown;
+        }
+        return command;
     }
+    Command::Unknown
 }
 
-/// `14` or `14d`; zero is rejected.
-fn parse_days(s: &str) -> Option<u32> {
-    let n: u32 = s.strip_suffix(['d', 'D']).unwrap_or(s).parse().ok()?;
-    (n > 0).then_some(n)
+/// `30d`, `2w` or a bare `14` (days). `None` when the word is not a
+/// duration at all; `Some(Err)` when it is one but out of range.
+fn parse_duration(w: &str) -> Option<Result<u32, ()>> {
+    let (num, unit) = match w.strip_suffix(['d', 'w']) {
+        Some(n) => (n, w.chars().last()),
+        None => (w, None),
+    };
+    let n: u32 = num.parse().ok()?;
+    let days = match unit {
+        Some('w') => n.checked_mul(7),
+        _ => Some(n),
+    };
+    Some(match days {
+        Some(d) if (1..=MAX_SNOOZE_DAYS).contains(&d) => Ok(d),
+        _ => Err(()),
+    })
 }
 
 #[cfg(test)]
@@ -61,50 +97,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn simple_verbs() {
+    fn approve() {
+        assert_eq!(parse("@baba_yaga approve"), Command::Approve);
         assert_eq!(parse("approve"), Command::Approve);
-        assert_eq!(parse("  Reject "), Command::Reject);
-        assert_eq!(parse("/status"), Command::Status);
-        assert_eq!(parse("!approve"), Command::Approve);
+        assert_eq!(parse("@baba_yaga please approve this"), Command::Approve);
+        assert_eq!(parse("Approve!"), Command::Approve);
+        assert_eq!(parse("/approve"), Command::Approve);
     }
 
     #[test]
-    fn mentions_are_skipped() {
-        assert_eq!(parse("@baba-yaga approve"), Command::Approve);
-        assert_eq!(parse("@baba-yaga: @fixer, status"), Command::Status);
-    }
-
-    #[test]
-    fn scan() {
-        assert_eq!(parse("scan"), Command::Scan { repo: None });
+    fn reject() {
+        assert_eq!(parse("@baba_yaga reject"), Command::Reject);
         assert_eq!(
-            parse("scan web"),
-            Command::Scan {
-                repo: Some("web".into())
-            }
+            parse("@baba_yaga I reject this one, false positive"),
+            Command::Reject
         );
-        assert_eq!(parse("scan web api"), Command::Unknown);
+    }
+
+    #[test]
+    fn negation_is_not_a_command() {
+        assert_eq!(parse("@baba_yaga don't approve this"), Command::Unknown);
+        assert_eq!(parse("@baba_yaga do not reject"), Command::Unknown);
     }
 
     #[test]
     fn snooze() {
-        let s = |id: &str, days| Command::Snooze {
-            id: id.into(),
-            days,
-        };
-        assert_eq!(parse("snooze GHSA-1"), s("GHSA-1", DEFAULT_SNOOZE_DAYS));
-        assert_eq!(parse("snooze GHSA-1 14"), s("GHSA-1", 14));
-        assert_eq!(parse("snooze GHSA-1 30d"), s("GHSA-1", 30));
-        assert_eq!(parse("snooze GHSA-1 0"), Command::Unknown);
-        assert_eq!(parse("snooze GHSA-1 soon"), Command::Unknown);
-        assert_eq!(parse("snooze"), Command::Unknown);
+        assert_eq!(parse("@baba_yaga snooze 30d"), Command::Snooze { days: 30 });
+        assert_eq!(
+            parse("@baba_yaga snooze 2w please"),
+            Command::Snooze { days: 14 }
+        );
+        assert_eq!(
+            parse("@baba_yaga snooze for 10 days"),
+            Command::Snooze { days: 10 }
+        );
+        assert_eq!(
+            parse("@baba_yaga snooze"),
+            Command::Snooze {
+                days: DEFAULT_SNOOZE_DAYS
+            }
+        );
+        assert_eq!(parse("@baba_yaga snooze 0d"), Command::Unknown);
+        assert_eq!(parse("@baba_yaga snooze 999w"), Command::Unknown);
+    }
+
+    #[test]
+    fn status_and_help() {
+        assert_eq!(parse("@baba_yaga status"), Command::Status);
+        assert_eq!(parse("@baba_yaga what is the status?"), Command::Status);
+        assert_eq!(parse("@baba_yaga help"), Command::Help);
+    }
+
+    #[test]
+    fn scan() {
+        assert_eq!(parse("@baba_yaga scan"), Command::Scan { repo: None });
+        assert_eq!(
+            parse("@baba_yaga scan now please"),
+            Command::Scan { repo: None }
+        );
+        assert_eq!(
+            parse("@baba_yaga scan samples"),
+            Command::Scan {
+                repo: Some("samples".into())
+            }
+        );
     }
 
     #[test]
     fn unknown() {
         assert_eq!(parse(""), Command::Unknown);
-        assert_eq!(parse("@baba-yaga"), Command::Unknown);
-        assert_eq!(parse("approve this please"), Command::Unknown);
-        assert_eq!(parse("hello"), Command::Unknown);
+        assert_eq!(parse("@baba_yaga"), Command::Unknown);
+        assert_eq!(parse("@baba_yaga ping"), Command::Unknown);
+        assert_eq!(parse("hello there"), Command::Unknown);
     }
 }
