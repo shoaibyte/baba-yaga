@@ -11,6 +11,7 @@ use serde_json::{json, Value};
 use switch_client::{Client, DomainEvent, EventPayload, Http, MessagePayload};
 use url::Url;
 
+use crate::audit::{self, Audit};
 use crate::config::{Config, Repo};
 use crate::room::commands::{self, Command};
 use crate::room::format;
@@ -238,6 +239,7 @@ struct Agent<'a> {
     cfg: &'a Config,
     client: Client,
     state: State,
+    audit: Audit,
 }
 
 /// Connect to Switch and run the loop: scan now, then on the schedule, and
@@ -254,7 +256,14 @@ pub async fn serve(cfg: &Config) -> Result<()> {
         .wait_connected(Duration::from_secs(15))
         .await
         .context("could not connect to Switch")?;
-    let mut agent = Agent { cfg, client, state };
+    let audit = Audit::beside(&cfg.state_path);
+    tracing::info!(path = %audit.path().display(), "audit log");
+    let mut agent = Agent {
+        cfg,
+        client,
+        state,
+        audit,
+    };
 
     agent
         .client
@@ -372,6 +381,7 @@ impl Agent<'_> {
                     }
                     Command::Approve => {
                         self.state.set_status(&g.key, Status::Approved)?;
+                        self.record(&g.key, "approved", &who).await?;
                         let mut text = format!("Approved by {who}, handing to the fixer.");
                         match &self.cfg.fixer_agent {
                             Some(fixer) => self.hand_to_fixer(fixer, &g.group, thread).await?,
@@ -383,11 +393,14 @@ impl Agent<'_> {
                     }
                     Command::Reject => {
                         self.state.set_status(&g.key, Status::Resolved)?;
+                        self.record(&g.key, "rejected", &who).await?;
                         format!("Rejected by {who}; closing this finding.")
                     }
                     Command::Snooze { days } => {
                         let until = Utc::now() + chrono::Duration::days(i64::from(days));
                         self.state.snooze(&g.key, until)?;
+                        let action = format!("snoozed until {}", until.format("%Y-%m-%d"));
+                        self.record(&g.key, &action, &who).await?;
                         format!("Snoozed by {who} until {}.", until.format("%Y-%m-%d"))
                     }
                     _ => unreachable!("outer match limits the command"),
@@ -405,6 +418,11 @@ impl Agent<'_> {
             Command::Unknown => format!("I did not understand that. Try {} help.", format::MENTION),
         };
         self.reply(thread, &reply).await
+    }
+
+    async fn record(&mut self, key: &str, action: &str, who: &str) -> Result<()> {
+        let line = audit::line(Utc::now(), key, action, who);
+        self.audit.append(&self.client, &self.state, &line).await
     }
 
     /// In the thread when there is one, else at the top of the room.
