@@ -32,10 +32,10 @@ struct Cli {
 enum Cmd {
     /// Connect to Switch and run the patrol on its schedule.
     Serve,
-    /// Scan once, post each package with findings as a thread over HTTP
-    /// (no socket), and exit. For CI. Groups already posted are skipped;
-    /// updates to existing threads are left for `serve`, which can reply in
-    /// threads.
+    /// Scan once, post each package with findings as a thread, and exit.
+    /// For CI. Opens a socket while posting, because thread replies need
+    /// one; stop `serve` first, the agent holds one connection at a time.
+    /// Groups already posted are skipped.
     Report {
         /// Only scan the configured repo with this name.
         #[arg(long, conflicts_with = "path")]

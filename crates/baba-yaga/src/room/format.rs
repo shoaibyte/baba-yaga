@@ -40,11 +40,12 @@ fn fix(group: &FindingGroup) -> &str {
 }
 
 /// The first message of a group's thread, under `MAX_GROUP_CHARS`:
-/// header, severity and reachability, up to eight advisories, a "more"
-/// line when some are left out, and the command hint.
+/// header, severity and reachability, up to eight advisories, and a "more"
+/// line when some are left out. The command hint follows as the first reply
+/// (`render_hint`).
 pub fn render_group(group: &FindingGroup) -> String {
     let ids = group.vuln_ids();
-    // Drop listed advisories until the text fits; the header and hint stay.
+    // Drop listed advisories until the text fits; the header stays.
     for listed in (0..=MAX_LISTED.min(ids.len())).rev() {
         let text = group_text(group, listed);
         if text.chars().count() <= MAX_GROUP_CHARS {
@@ -111,10 +112,14 @@ fn group_text(group: &FindingGroup, listed: usize) -> String {
     if total > seen.len() {
         lines.push(format!("more: {}", total - seen.len()));
     }
-    lines.push(format!(
-        "Reply in this thread: {MENTION} approve, {MENTION} snooze 30d, or {MENTION} status"
-    ));
     lines.join("\n")
+}
+
+/// The first reply in a group's thread. Discord shows a thread only once a
+/// message is posted in it, so this reply is what gives people a thread to
+/// answer in.
+pub fn render_hint() -> String {
+    format!("Commands here: {MENTION} approve, {MENTION} snooze 30d, {MENTION} status")
 }
 
 /// One line for a thread whose group changed since it was posted.
@@ -250,8 +255,15 @@ mod tests {
             "samples / axios 0.21.1 -> fix: 1.18.0\n\
              npm, HIGH 7.5, reachable: unknown, 2 advisories, in node/package-lock.json\n\
              - GHSA-a (HIGH 7.5): Server-Side Request Forgery\n\
-             - GHSA-b (MEDIUM 5.3): Inefficient Regular Expression\n\
-             Reply in this thread: @baba_yaga approve, @baba_yaga snooze 30d, or @baba_yaga status"
+             - GHSA-b (MEDIUM 5.3): Inefficient Regular Expression"
+        );
+    }
+
+    #[test]
+    fn hint_text() {
+        assert_eq!(
+            render_hint(),
+            "Commands here: @baba_yaga approve, @baba_yaga snooze 30d, @baba_yaga status"
         );
     }
 
@@ -264,7 +276,7 @@ mod tests {
         let g = group(findings).remove(0);
         let text = render_group(&g);
         assert!(text.chars().count() <= MAX_GROUP_CHARS, "{}", text.len());
-        assert!(text.contains("\nmore: 22\n"), "{text}");
+        assert!(text.ends_with("\nmore: 22"), "{text}");
         assert_eq!(text.lines().filter(|l| l.starts_with("- ")).count(), 8);
         // Each summary is cut at 100 characters.
         let item = text.lines().find(|l| l.starts_with("- ")).unwrap();

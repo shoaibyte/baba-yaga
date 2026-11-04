@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
-use switch_client::{Client, DomainEvent, EventPayload, Http, MessagePayload};
+use switch_client::{Client, DomainEvent, EventPayload, MessagePayload};
 use url::Url;
 
 use crate::audit::{self, Audit};
@@ -56,51 +56,49 @@ impl SwitchEnv {
 // Publishing groups
 // ---------------------------------------------------------------------------
 
-/// Where group posts go.
-pub enum Poster<'a> {
-    /// Over the live connection: top-level posts and thread replies.
-    Live(&'a Client),
-    /// HTTP only, no socket: top-level posts only, because `POST /message`
-    /// ignores `thread_id` (see docs/NOTES.md).
-    Http { http: &'a Http, env: &'a SwitchEnv },
-    /// Print to stdout; post nothing, store nothing.
-    DryRun,
+/// Where group posts go. A trait so tests can count what is posted.
+pub(crate) trait RoomPoster {
+    /// Post at the top of the room; returns the message id.
+    async fn post(&self, text: &str) -> Result<String>;
+    /// Reply in the thread that `thread_id` (any message in it) belongs to.
+    async fn reply(&self, thread_id: &str, text: &str) -> Result<()>;
+    /// False for a dry run, which records nothing in state.
+    fn writes_state(&self) -> bool {
+        true
+    }
 }
 
-impl Poster<'_> {
-    /// Post at the top of the room; returns the message id.
+/// Over a live connection. Thread replies need one: `POST /message`
+/// ignores `thread_id` (see docs/NOTES.md).
+pub(crate) struct Live<'a>(pub &'a Client);
+
+impl RoomPoster for Live<'_> {
     async fn post(&self, text: &str) -> Result<String> {
-        Ok(match self {
-            Poster::Live(c) => c.post(text).await?.event_id,
-            Poster::Http { http, env } => {
-                http.post_message(&env.agent_key, &env.agent_id, &env.room_id, text)
-                    .await?
-                    .event_id
-            }
-            Poster::DryRun => {
-                println!("--- post ---\n{text}\n");
-                "dry-run".into()
-            }
-        })
+        Ok(self.0.post(text).await?.event_id)
     }
 
-    /// Reply in a thread. `Ok(false)` when this poster cannot.
-    async fn reply(&self, thread_id: &str, text: &str) -> Result<bool> {
-        match self {
-            Poster::Live(c) => {
-                c.post_in_thread(thread_id, text).await?;
-                Ok(true)
-            }
-            Poster::Http { .. } => Ok(false),
-            Poster::DryRun => {
-                println!("--- reply in {thread_id} ---\n{text}\n");
-                Ok(true)
-            }
-        }
+    async fn reply(&self, thread_id: &str, text: &str) -> Result<()> {
+        self.0.post_in_thread(thread_id, text).await?;
+        Ok(())
+    }
+}
+
+/// Print to stdout; post nothing, store nothing.
+pub(crate) struct DryRun;
+
+impl RoomPoster for DryRun {
+    async fn post(&self, text: &str) -> Result<String> {
+        println!("--- post ---\n{text}\n");
+        Ok("dry-run".into())
+    }
+
+    async fn reply(&self, thread_id: &str, text: &str) -> Result<()> {
+        println!("--- reply in {thread_id} ---\n{text}\n");
+        Ok(())
     }
 
     fn writes_state(&self) -> bool {
-        !matches!(self, Poster::DryRun)
+        false
     }
 }
 
@@ -108,10 +106,9 @@ impl Poster<'_> {
 pub struct Summary {
     pub groups: usize,
     pub new_threads: usize,
+    /// Command hints posted in threads, new or older ones without a hint.
+    pub hints: usize,
     pub updates: usize,
-    /// Changed groups whose thread could not be updated (HTTP-only poster);
-    /// left unrecorded so the next live scan posts the update.
-    pub pending_updates: usize,
     pub unchanged: usize,
     pub snoozed: usize,
     pub resolved: usize,
@@ -122,12 +119,15 @@ impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} packages with findings: {} new threads, {} updates, {} unchanged, {} snoozed, {} resolved",
-            self.groups, self.new_threads, self.updates, self.unchanged, self.snoozed, self.resolved
+            "{} packages with findings: {} new threads, {} hints, {} updates, {} unchanged, {} snoozed, {} resolved",
+            self.groups,
+            self.new_threads,
+            self.hints,
+            self.updates,
+            self.unchanged,
+            self.snoozed,
+            self.resolved
         )?;
-        if self.pending_updates > 0 {
-            write!(f, ", {} updates left for serve", self.pending_updates)?;
-        }
         if self.failed_repos > 0 {
             write!(f, ", {} repos failed to scan", self.failed_repos)?;
         }
@@ -161,12 +161,14 @@ pub async fn scan_groups(
 }
 
 /// Post every group that needs it and record it in `state` (if any):
-/// a new group gets a thread, a changed group gets a one-line update in its
-/// thread, snoozed and resolved groups are skipped.
-pub async fn publish(
+/// a new group gets a root message and the command hint as its first reply,
+/// a changed group gets a one-line update in its thread, snoozed and
+/// resolved groups are skipped. A thread from before hints existed gets its
+/// hint once; the root is never posted again.
+pub(crate) async fn publish<P: RoomPoster>(
     groups: &[FindingGroup],
     state: Option<&State>,
-    poster: &Poster<'_>,
+    poster: &P,
     now: DateTime<Utc>,
     summary: &mut Summary,
 ) -> Result<()> {
@@ -206,10 +208,16 @@ pub async fn publish(
                 tracing::info!(%key, thread_id = %id, "thread opened");
                 summary.new_threads += 1;
                 tokio::time::sleep(POST_GAP).await;
+                post_hint(poster, state, &key, &id, summary).await?;
             }
-            Some((ex, thread_id)) if change == Change::Changed => {
-                let text = format::render_update(&ex.group, g);
-                if poster.reply(&thread_id, &text).await? {
+            Some((ex, thread_id)) => {
+                if !ex.hint_posted {
+                    post_hint(poster, state, &key, &thread_id, summary).await?;
+                }
+                if change == Change::Changed {
+                    poster
+                        .reply(&thread_id, &format::render_update(&ex.group, g))
+                        .await?;
                     if let Some(s) = state {
                         s.record(g, now)?;
                         s.mark_posted(&key, now)?;
@@ -218,16 +226,31 @@ pub async fn publish(
                     summary.updates += 1;
                     tokio::time::sleep(POST_GAP).await;
                 } else {
-                    tracing::info!(%key, %thread_id, "changed; update left for serve");
-                    summary.pending_updates += 1;
+                    state.map(record).transpose()?;
+                    summary.unchanged += 1;
                 }
-            }
-            Some(_) => {
-                state.map(record).transpose()?;
-                summary.unchanged += 1;
             }
         }
     }
+    Ok(())
+}
+
+/// The command hint as the thread's first reply, so the thread exists for
+/// people to answer in.
+async fn post_hint<P: RoomPoster>(
+    poster: &P,
+    state: Option<&State>,
+    key: &str,
+    thread_id: &str,
+    summary: &mut Summary,
+) -> Result<()> {
+    poster.reply(thread_id, &format::render_hint()).await?;
+    if let Some(s) = state {
+        s.set_hint_posted(key)?;
+    }
+    tracing::info!(%key, %thread_id, "hint posted in thread");
+    summary.hints += 1;
+    tokio::time::sleep(POST_GAP).await;
     Ok(())
 }
 
@@ -341,7 +364,7 @@ impl Agent<'_> {
         publish(
             &groups,
             Some(&self.state),
-            &Poster::Live(&self.client),
+            &Live(&self.client),
             now,
             &mut summary,
         )
@@ -508,25 +531,16 @@ pub struct ReportOptions {
     pub dry_run: bool,
 }
 
-/// Scan once and post over HTTP, without a socket, then exit. With state,
-/// groups already posted are skipped, and changed ones are left unrecorded
-/// so `serve` posts the update in their thread.
+/// Scan once, post, then exit. Posting opens a socket for as long as it
+/// takes, because the hint in each new thread is a thread reply and those
+/// need a live connection. With state, groups already posted are skipped.
 pub async fn report(opts: ReportOptions) -> Result<()> {
     let state = opts.state_path.as_deref().map(State::open).transpose()?;
-    let env;
-    let http;
-    let poster = if opts.dry_run {
-        Poster::DryRun
+    // Fail on a missing variable before the scan, not after.
+    let env = if opts.dry_run {
+        None
     } else {
-        env = SwitchEnv::load(opts.config_room.as_deref())?;
-        http = Http::new(env.url.clone());
-        http.health()
-            .await
-            .with_context(|| format!("GET /health failed on {}", env.url))?;
-        Poster::Http {
-            http: &http,
-            env: &env,
-        }
+        Some(SwitchEnv::load(opts.config_room.as_deref())?)
     };
     let now = Utc::now();
     if let Some(s) = &state {
@@ -540,7 +554,27 @@ pub async fn report(opts: ReportOptions) -> Result<()> {
         &mut summary,
     )
     .await?;
-    publish(&groups, state.as_ref(), &poster, now, &mut summary).await?;
+    match env {
+        None => publish(&groups, state.as_ref(), &DryRun, now, &mut summary).await?,
+        Some(env) => {
+            let (client, mut events) =
+                Client::connect(env.url, env.agent_id, env.agent_key, env.room_id).await?;
+            // Nothing here answers messages; keep the channel empty so the
+            // connection task never waits on it.
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            let posted = async {
+                client
+                    .wait_connected(Duration::from_secs(15))
+                    .await
+                    .context("could not connect to Switch")?;
+                publish(&groups, state.as_ref(), &Live(&client), now, &mut summary).await
+            }
+            .await;
+            client.shutdown().await?;
+            drain.await?;
+            posted?;
+        }
+    }
     tracing::info!(%summary, "report finished");
     if summary.failed_repos > 0 {
         bail!("{} repos failed to scan", summary.failed_repos);
@@ -553,6 +587,7 @@ mod tests {
     use super::*;
     use crate::scanner::Finding;
     use chrono::TimeZone;
+    use std::cell::RefCell;
 
     fn finding(package: &str, id: &str) -> Finding {
         Finding {
@@ -587,10 +622,81 @@ mod tests {
         ]);
         let now = Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap();
         let mut summary = Summary::default();
-        publish(&groups, Some(&state), &Poster::DryRun, now, &mut summary)
+        publish(&groups, Some(&state), &DryRun, now, &mut summary)
             .await
             .unwrap();
         assert_eq!(summary.new_threads, 2);
         assert!(state.list_open(now).unwrap().is_empty());
+    }
+
+    /// Records posts instead of sending them. Roots get ids root-1, root-2...
+    #[derive(Default)]
+    struct Recorder {
+        posts: RefCell<Vec<String>>,
+        replies: RefCell<Vec<(String, String)>>,
+    }
+
+    impl RoomPoster for Recorder {
+        async fn post(&self, text: &str) -> Result<String> {
+            let mut posts = self.posts.borrow_mut();
+            posts.push(text.into());
+            Ok(format!("root-{}", posts.len()))
+        }
+
+        async fn reply(&self, thread_id: &str, text: &str) -> Result<()> {
+            self.replies
+                .borrow_mut()
+                .push((thread_id.into(), text.into()));
+            Ok(())
+        }
+    }
+
+    fn t0() -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap()
+    }
+
+    #[tokio::test]
+    async fn new_group_gets_root_then_hint_in_its_thread() {
+        let state = State::open_in_memory().unwrap();
+        let groups = scanner::group(vec![finding("lodash", "GHSA-1")]);
+        let poster = Recorder::default();
+        let mut summary = Summary::default();
+        publish(&groups, Some(&state), &poster, t0(), &mut summary)
+            .await
+            .unwrap();
+        assert_eq!(poster.posts.borrow().len(), 1);
+        assert_eq!(
+            *poster.replies.borrow(),
+            vec![("root-1".to_string(), format::render_hint())]
+        );
+        let row = state.get(&groups[0].key()).unwrap().unwrap();
+        assert_eq!(row.thread_id.as_deref(), Some("root-1"));
+        assert!(row.hint_posted);
+        assert_eq!((summary.new_threads, summary.hints), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn old_thread_without_hint_gets_exactly_one() {
+        let state = State::open_in_memory().unwrap();
+        let groups = scanner::group(vec![finding("lodash", "GHSA-1")]);
+        let key = groups[0].key();
+        // As serve left it before hints: posted root, no hint.
+        state.record(&groups[0], t0()).unwrap();
+        state.set_thread(&key, "sw_root", t0()).unwrap();
+        assert!(!state.get(&key).unwrap().unwrap().hint_posted);
+
+        let poster = Recorder::default();
+        for _ in 0..2 {
+            let mut summary = Summary::default();
+            publish(&groups, Some(&state), &poster, t0(), &mut summary)
+                .await
+                .unwrap();
+        }
+        assert!(poster.posts.borrow().is_empty(), "root is not reposted");
+        assert_eq!(
+            *poster.replies.borrow(),
+            vec![("sw_root".to_string(), format::render_hint())]
+        );
+        assert!(state.get(&key).unwrap().unwrap().hint_posted);
     }
 }

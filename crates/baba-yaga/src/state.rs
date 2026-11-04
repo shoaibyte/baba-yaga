@@ -10,11 +10,11 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::scanner::finding::FindingGroup;
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 /// Version 2. Version 1 had one row per advisory (`findings`). This is
 /// pre-release, so the migration drops v1 rather than converting it.
-const SCHEMA: &str = "
+const SCHEMA_V2: &str = "
 DROP TABLE IF EXISTS findings;
 CREATE TABLE IF NOT EXISTS groups (
     key            TEXT PRIMARY KEY,  -- repo:ecosystem:package
@@ -36,6 +36,10 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 ";
+
+/// Version 3: whether the in-thread command hint was posted. Rows from v2
+/// start at 0, so the next scan posts their hint.
+const MIGRATE_V3: &str = "ALTER TABLE groups ADD COLUMN hint_posted INTEGER NOT NULL DEFAULT 0;";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -97,6 +101,9 @@ pub struct GroupState {
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub last_posted: Option<DateTime<Utc>>,
+    /// The command hint was posted in the thread. Posting it is what makes
+    /// the thread exist on Discord.
+    pub hint_posted: bool,
 }
 
 impl GroupState {
@@ -124,11 +131,19 @@ impl State {
 
     fn init(conn: Connection) -> Result<Self> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version < SCHEMA_VERSION {
-            conn.execute_batch(SCHEMA)?;
-            conn.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        } else if version > SCHEMA_VERSION {
+        if version > SCHEMA_VERSION {
             bail!("state db schema {version} is newer than this build ({SCHEMA_VERSION})");
+        }
+        if version < SCHEMA_VERSION {
+            let tx = conn.unchecked_transaction()?;
+            if version < 2 {
+                tx.execute_batch(SCHEMA_V2)?;
+            }
+            if version < 3 {
+                tx.execute_batch(MIGRATE_V3)?;
+            }
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+            tx.commit()?;
         }
         Ok(Self { conn })
     }
@@ -208,6 +223,10 @@ impl State {
             "thread_id = ?2, last_posted = ?3",
             params![key, thread_id, now.to_rfc3339()],
         )
+    }
+
+    pub fn set_hint_posted(&self, key: &str) -> Result<()> {
+        self.update(key, "hint_posted = 1", params![key])
     }
 
     pub fn mark_posted(&self, key: &str, now: DateTime<Utc>) -> Result<()> {
@@ -304,7 +323,7 @@ impl State {
 }
 
 const COLUMNS: &str =
-    "key, json, thread_id, status, snoozed_until, first_seen, last_seen, last_posted";
+    "key, json, thread_id, status, snoozed_until, first_seen, last_seen, last_posted, hint_posted";
 
 /// Map one row; the inner `Result` carries JSON and date errors, which
 /// rusqlite's closure type cannot.
@@ -317,6 +336,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<GroupState>> {
     let first_seen: String = row.get(5)?;
     let last_seen: String = row.get(6)?;
     let last_posted: Option<String> = row.get(7)?;
+    let hint_posted: bool = row.get(8)?;
     Ok((|| {
         Ok(GroupState {
             key,
@@ -327,6 +347,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<GroupState>> {
             first_seen: parse_time(&first_seen)?,
             last_seen: parse_time(&last_seen)?,
             last_posted: last_posted.as_deref().map(parse_time).transpose()?,
+            hint_posted,
         })
     })())
 }
@@ -465,8 +486,42 @@ mod tests {
         assert!(!has_v1);
         s.set_meta("audit_doc", "doc-1").unwrap();
         drop(s);
-        // Reopening at v2 keeps data.
+        // Reopening at the current version keeps data.
         let s = State::open(&path).unwrap();
         assert_eq!(s.meta("audit_doc").unwrap().as_deref(), Some("doc-1"));
+    }
+
+    #[test]
+    fn v2_database_gains_hint_posted_and_keeps_rows() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("state.db");
+        let g = lodash(&[("GHSA-1", "4.17.12")]);
+        {
+            // A v2 file with one posted group, as serve left it.
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V2).unwrap();
+            conn.pragma_update(None, "user_version", 2).unwrap();
+            conn.execute(
+                "INSERT INTO groups (key, vuln_ids, highest_fixed, version, thread_id, status,
+                                     first_seen, last_seen, last_posted, json)
+                 VALUES (?1, '[\"GHSA-1\"]', '4.17.12', '4.17.11', 'sw_root', 'open', ?2, ?2, ?2, ?3)",
+                params![g.key(), t0().to_rfc3339(), serde_json::to_string(&g).unwrap()],
+            )
+            .unwrap();
+        }
+        let s = State::open(&path).unwrap();
+        let version: i64 = s
+            .conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 3);
+        let row = s.get(&g.key()).unwrap().unwrap();
+        assert_eq!(row.thread_id.as_deref(), Some("sw_root"));
+        assert!(!row.hint_posted, "existing rows start without a hint");
+
+        s.set_hint_posted(&g.key()).unwrap();
+        drop(s);
+        let s = State::open(&path).unwrap();
+        assert!(s.get(&g.key()).unwrap().unwrap().hint_posted);
     }
 }
