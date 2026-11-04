@@ -22,8 +22,9 @@ pub enum Error {
     #[error("connection refused ({code}): {reason}")]
     Refused { code: u16, reason: String },
 
-    /// An `evicted` frame. On the wire it is `{code, reason}`; `reason` here
-    /// carries the eviction code (`taken_over`, `heartbeat_lapsed`, ...).
+    /// A final `evicted` frame. On the wire it is `{code, reason, room_id}`.
+    /// `reason` here is `taken_over`, or `closed: <server reason>`. Resumable
+    /// evictions never surface: the connection task reconnects instead.
     #[error("evicted: {reason}")]
     Evicted { reason: String },
 

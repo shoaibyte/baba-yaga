@@ -19,5 +19,6 @@ pub use types::{
     RegisterRequest, RegisterResponse, RoomJoinPayload, RoomReleased, Scope, StartFrom,
     SubscriptionChanged,
 };
+pub use ws::{ConnectionHandle, WsConfig};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
