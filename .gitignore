@@ -5,3 +5,5 @@ scratch/
 .idea/
 samples/node/node_modules/
 samples/php/vendor/
+baba-yaga.toml
+audit.log
