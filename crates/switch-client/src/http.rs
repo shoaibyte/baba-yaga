@@ -128,6 +128,14 @@ impl Http {
         Ok(wrapped.result)
     }
 
+    /// `GET /agents/{id}/ops`: the operation catalogue as returned,
+    /// `{"operations": {"<name>": {"description", "input_schema"}}}`.
+    pub async fn list_ops(&self, agent_key: &str, agent_id: &str) -> Result<Value, Error> {
+        let url = self.url(&["agents", agent_id, "ops"])?;
+        let resp = self.client.get(url).bearer_auth(agent_key).send().await?;
+        Ok(check(resp).await?.json().await?)
+    }
+
     /// `GET /health`. Public; the probe for "is this the bridge base URL".
     pub async fn health(&self) -> Result<(), Error> {
         let url = self.url(&["health"])?;

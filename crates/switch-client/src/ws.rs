@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::{HeaderValue, AUTHORIZATION};
@@ -71,6 +71,7 @@ pub struct ConnectionHandle {
     pub connection_id: Uuid,
     shutdown: Option<oneshot::Sender<()>>,
     join: JoinHandle<Result<(), Error>>,
+    connected: watch::Receiver<bool>,
 }
 
 impl ConnectionHandle {
@@ -87,6 +88,29 @@ impl ConnectionHandle {
             .map_err(|e| Error::Protocol(format!("connection task failed: {e}")))?
     }
 
+    /// Wait until a `connection_state` has arrived on the current socket.
+    /// Operations bound to the connection fail before that. Errors if the
+    /// task stops first or `timeout` passes.
+    pub async fn wait_connected(&self, timeout: Duration) -> Result<(), Error> {
+        let mut rx = self.connected.clone();
+        // Map away the borrow `wait_for` returns before `rx` goes out of scope.
+        let waited =
+            tokio::time::timeout(timeout, async { rx.wait_for(|c| *c).await.map(|_| ()) }).await;
+        match waited {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => Err(Error::Protocol("connection task stopped".into())),
+            Err(_) => Err(Error::Protocol(format!(
+                "not connected after {}s",
+                timeout.as_secs()
+            ))),
+        }
+    }
+
+    /// True while a socket is open and has sent `connection_state`.
+    pub fn is_connected(&self) -> bool {
+        *self.connected.borrow()
+    }
+
     /// True once the task has stopped for any reason.
     pub fn is_finished(&self) -> bool {
         self.join.is_finished()
@@ -100,11 +124,13 @@ impl ConnectionHandle {
 pub fn spawn(cfg: WsConfig, events: mpsc::Sender<DomainEvent>) -> ConnectionHandle {
     let connection_id = Uuid::new_v4();
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    let join = tokio::spawn(run(cfg, connection_id, events, shutdown_rx));
+    let (connected_tx, connected_rx) = watch::channel(false);
+    let join = tokio::spawn(run(cfg, connection_id, events, shutdown_rx, connected_tx));
     ConnectionHandle {
         connection_id,
         shutdown: Some(shutdown_tx),
         join,
+        connected: connected_rx,
     }
 }
 
@@ -146,6 +172,7 @@ async fn run(
     connection_id: Uuid,
     events: mpsc::Sender<DomainEvent>,
     mut shutdown: oneshot::Receiver<()>,
+    connected: watch::Sender<bool>,
 ) -> Result<(), Error> {
     let mut resume = Resume::default();
     let mut backoff = Backoff::default();
@@ -159,8 +186,10 @@ async fn run(
             &mut backoff,
             &events,
             &mut shutdown,
+            &connected,
         )
         .await;
+        connected.send_replace(false);
         let why = match end {
             SessionEnd::Shutdown => {
                 tracing::info!(%connection_id, "connection shut down");
@@ -217,6 +246,7 @@ async fn session(
     backoff: &mut Backoff,
     events: &mpsc::Sender<DomainEvent>,
     shutdown: &mut oneshot::Receiver<()>,
+    connected: &watch::Sender<bool>,
 ) -> SessionEnd {
     let req = match build_request(cfg, connection_id, resume) {
         Ok(r) => r,
@@ -311,6 +341,7 @@ async fn session(
                     idle = idle_timeout(h);
                 }
                 backoff.reset();
+                connected.send_replace(true);
                 tracing::info!(
                     %connection_id,
                     generation = s.generation,

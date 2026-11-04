@@ -102,6 +102,11 @@ impl Client {
         self.handle.connection_id
     }
 
+    /// Wait until the socket is up, so operations bound to it can run.
+    pub async fn wait_connected(&self, timeout: std::time::Duration) -> Result<(), Error> {
+        self.handle.wait_connected(timeout).await
+    }
+
     /// True once the connection task has stopped; `shutdown` returns why.
     pub fn is_closed(&self) -> bool {
         self.handle.is_finished()
