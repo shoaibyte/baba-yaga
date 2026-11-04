@@ -77,11 +77,11 @@ fn group_text(group: &FindingGroup, listed: usize) -> String {
             fix(group)
         ),
         format!(
-            "{}, {}, {}, {} advisories, in {}",
+            "{}, {}, {}, {}, in {}",
             group.ecosystem,
             severity(group.max_severity),
             reachable,
-            group.vuln_ids().len(),
+            advisories(group.vuln_ids().len()),
             sources.join(", ")
         ),
     ];
@@ -135,8 +135,8 @@ pub fn render_update(old: &FindingGroup, new: &FindingGroup) -> String {
             String::new()
         };
         parts.push(format!(
-            "{} new advisories ({}{tail})",
-            added.len(),
+            "{} added ({}{tail})",
+            advisories(added.len()),
             shown.join(", ")
         ));
     }
@@ -161,12 +161,12 @@ pub fn render_status(groups: &[GroupState]) -> String {
     let mut used = lines[0].len();
     for (i, g) in groups.iter().enumerate() {
         let line = format!(
-            "{} / {} {}: {}, {} advisories, {}, fix {}",
+            "{} / {} {}: {}, {}, {}, fix {}",
             g.group.repo,
             g.group.package,
             g.group.version,
             g.status.as_str(),
-            g.group.vuln_ids().len(),
+            advisories(g.group.vuln_ids().len()),
             severity(g.group.max_severity),
             fix(&g.group)
         );
@@ -191,6 +191,14 @@ pub fn render_help() -> String {
          scan or scan <repo>: scan now\n\
          help: this list"
     )
+}
+
+fn advisories(n: usize) -> String {
+    if n == 1 {
+        "1 advisory".into()
+    } else {
+        format!("{n} advisories")
+    }
 }
 
 /// At most `max` characters, ending in "..." when cut. Cuts on a char
@@ -222,6 +230,12 @@ mod tests {
             reachable: None,
             source_path: "node/package-lock.json".into(),
         }
+    }
+
+    #[test]
+    fn single_advisory_is_singular() {
+        let g = group(vec![finding("GHSA-a", 9.8, "Prototype Pollution")]).remove(0);
+        assert!(render_group(&g).contains(", 1 advisory, in "));
     }
 
     #[test]
@@ -267,7 +281,7 @@ mod tests {
         let new = group(vec![finding("GHSA-a", 7.5, "s"), f]).remove(0);
         assert_eq!(
             render_update(&old, &new),
-            "Update: 1 new advisories (GHSA-b); fix now 1.19.0."
+            "Update: 1 advisory added (GHSA-b); fix now 1.19.0."
         );
     }
 
