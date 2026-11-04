@@ -1,5 +1,5 @@
 use futures_util::{SinkExt, StreamExt};
-use switch_client::{ConnectOptions, ControlFrame, Frame, Pong, RawFrame};
+use switch_client::{ConnectOptions, ControlFrame, EventPayload, Frame, Http, Pong, RawFrame};
 use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::http::header::AUTHORIZATION;
@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (ws, resp) = connect_async(req).await?;
     tracing::info!(status = %resp.status(), "socket open");
 
+    let http = Http::new(base.parse()?);
     let (mut tx, mut rx) = ws.split();
     let mut cursor: u64 = 0;
     while let Some(msg) = rx.next().await {
@@ -50,6 +51,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok(Frame::Event(ev)) => {
                         cursor = ev.id;
                         println!("EVENT seq={} type={}", ev.id, ev.data.kind);
+                        if let Ok(EventPayload::Message(m)) = ev.data.typed_payload() {
+                            if m.addressed && m.body.contains("ping") {
+                                http.post_message(&agent_key, &agent_id, &ev.data.room_id, "pong")
+                                    .await?;
+                            }
+                        }
                     }
                     Ok(other) => println!("CTRL {other:?}"),
                     Err(e) => println!("UNPARSED {e}"),
