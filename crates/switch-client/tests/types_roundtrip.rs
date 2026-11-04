@@ -119,16 +119,20 @@ fn room_join_event() {
     assert_eq!(j.member_name.as_deref(), Some("fixer"));
 }
 
-// Hand-written. An unknown event name is a control frame even when it carries
-// an `id`; the id is dropped and `data` is kept.
+// Hand-written. A frame with an `id` is a domain event even when its name is
+// unknown, so the cursor can advance past it; the payload stays raw.
 #[test]
-fn unknown_domain_event_becomes_unknown_control() {
+fn unknown_event_with_id_is_domain_event() {
     let json = r#"{"event":"reaction","data":{"type":"reaction","room_id":"!r:s","payload":{"x":1},"sequence":9},"id":9}"#;
-    let ControlFrame::Unknown { event, data } = control(json) else {
-        panic!("expected unknown");
+    let Frame::Event(ev) = parse(json) else {
+        panic!("expected domain event");
     };
-    assert_eq!(event, "reaction");
-    assert_eq!(data["payload"]["x"], 1);
+    assert_eq!(ev.event, "reaction");
+    assert_eq!(ev.id, 9);
+    let EventPayload::Unknown(payload) = ev.data.typed_payload().unwrap() else {
+        panic!("expected unknown payload");
+    };
+    assert_eq!(payload["x"], 1);
 }
 
 // Hand-written.

@@ -249,16 +249,21 @@ pub struct RawFrame {
 }
 
 impl RawFrame {
-    /// Dispatch on `event`. Fails only when a known event's `data` does not
-    /// match its type; an unknown event name becomes [`ControlFrame::Unknown`].
+    /// Any frame with an `id` is a domain event, whatever its name; its
+    /// payload decodes to [`EventPayload::Unknown`] when the type is new.
+    /// Otherwise dispatch on `event`. Fails only when a known frame's `data`
+    /// does not match its type; an unknown event name without an `id`
+    /// becomes [`ControlFrame::Unknown`].
     pub fn into_frame(self) -> Result<Frame, serde_json::Error> {
         let RawFrame { event, data, id } = self;
         Ok(match event.as_str() {
-            "message" | "command" | "room_join" => Frame::Event(DomainEvent {
-                data: serde_json::from_value(data)?,
-                id: id.unwrap_or(0),
-                event,
-            }),
+            _ if id.is_some() || matches!(event.as_str(), "message" | "command" | "room_join") => {
+                Frame::Event(DomainEvent {
+                    data: serde_json::from_value(data)?,
+                    id: id.unwrap_or(0),
+                    event,
+                })
+            }
             "connection_state" => {
                 Frame::Control(ControlFrame::ConnectionState(serde_json::from_value(data)?))
             }
