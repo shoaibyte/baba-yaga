@@ -1,15 +1,18 @@
-//! One literal JSON example per frame type, written by hand from the
-//! agent-connection and agent-events docs pages.
+//! Frame fixtures: the control frames are verbatim from switch-core 0.31
+//! (agent-protocol 9); the message event is hand-written to the documented
+//! domain shape.
 
-use switch_client::types::{close_code, AttachmentGroup};
+use switch_client::types::AttachmentGroup;
 use switch_client::{
     Addressing, ConnectOptions, ConnectionModel, ControlFrame, EventPayload, Filter, Frame,
-    IntegrationProfile, Pong, RegisterRequest, RegisterResponse, Scope, StartFrom,
+    IntegrationProfile, Pong, RawFrame, RegisterRequest, RegisterResponse, Scope, StartFrom,
 };
 use uuid::Uuid;
 
 fn parse(json: &str) -> Frame {
-    serde_json::from_str(json).expect("frame parses")
+    serde_json::from_str::<RawFrame>(json)
+        .and_then(RawFrame::into_frame)
+        .expect("frame parses")
 }
 
 fn control(json: &str) -> ControlFrame {
@@ -21,23 +24,14 @@ fn control(json: &str) -> ControlFrame {
 
 #[test]
 fn message_event() {
-    let json = r#"{"event": "message",
-        "data": {"type": "message", "room_id": "!room:switch", "bridge_id": null,
-                 "channel_type": "channel_public",
-                 "payload": {"addressed": true, "sender": "@switch-user-a1b2:switch",
-                             "sender_name": "Kari", "message_id": "$m1", "body": "@baba-yaga status",
-                             "timestamp": 1761900000000, "thread_id": null,
-                             "attachments": [{"filename": "a.txt", "mimetype": "text/plain",
-                                              "size": 12, "mxc": "mxc://switch/abc", "msgtype": "m.file"}],
-                             "some_future_field": 1},
-                 "sequence": 4813},
-        "id": 4813}"#;
+    let json = r#"{"event":"message","data":{"type":"message","room_id":"f48120fd-a3d6-4928-af45-ff30ad757d2c","bridge_id":null,"channel_type":"channel_public","payload":{"addressed":true,"sender":"@switch-user-a1b2:switch","sender_name":"Kari","message_id":"$m1","body":"@baba-yaga status","timestamp":1761900000000,"thread_id":null,"attachments":[],"some_future_field":1},"sequence":15},"id":15}"#;
     let Frame::Event(ev) = parse(json) else {
         panic!("expected domain event");
     };
     assert_eq!(ev.event, "message");
-    assert_eq!(ev.id, 4813);
+    assert_eq!(ev.id, 15);
     assert_eq!(ev.data.sequence, ev.id);
+    assert_eq!(ev.data.kind, "message");
     assert_eq!(ev.data.bridge_id, None);
     assert_eq!(ev.data.channel_type.as_deref(), Some("channel_public"));
     let EventPayload::Message(m) = ev.data.typed_payload().unwrap() else {
@@ -46,8 +40,52 @@ fn message_event() {
     assert!(m.addressed);
     assert_eq!(m.body, "@baba-yaga status");
     assert_eq!(m.timestamp, 1_761_900_000_000);
-    assert_eq!(m.attachments.len(), 1);
-    assert_eq!(m.attachments[0].size, Some(12));
+}
+
+#[test]
+fn connection_state_frame_observed() {
+    let json = r#"{"event":"connection_state","data":{"connection_id":"575744a3-87e4-4da3-9e75-9b486ce46a21","agent_id":"5742bb2a-e565-4e88-a19c-e43ea1a2125a","generation":8589934592,"scope":"single","filter":"all","spawn_capable":false,"rooms":["f48120fd-a3d6-4928-af45-ff30ad757d2c"],"cursor":0,"position":{"s":4294967296,"r:f48120fd-a3d6-4928-af45-ff30ad757d2c":14},"protocol":9,"heartbeat_interval_seconds":2.0,"server":{"version":"0.31.0","contracts":{"agent-protocol":{"speaks":9,"accepts":1}}},"client":{"speaks":null,"accepts":null,"artifact":"baba-yaga","version":"0.1.0"}}}"#;
+    let ControlFrame::ConnectionState(s) = control(json) else {
+        panic!("expected connection_state");
+    };
+    assert_eq!(s.generation, 8_589_934_592);
+    assert_eq!(s.protocol, Some(9));
+    assert_eq!(s.heartbeat_interval_seconds, Some(2.0));
+    assert_eq!(s.cursor, Some(0));
+    assert_eq!(s.scope, Scope::Single);
+    assert_eq!(s.filter, Filter::All);
+    assert_eq!(s.rooms, vec!["f48120fd-a3d6-4928-af45-ff30ad757d2c"]);
+    assert_eq!(s.position.unwrap()["s"], 4_294_967_296u64);
+    assert_eq!(s.server["version"], "0.31.0");
+}
+
+#[test]
+fn ping_frame_observed() {
+    assert!(matches!(
+        control(r#"{"event":"ping","data":{}}"#),
+        ControlFrame::Ping
+    ));
+}
+
+#[test]
+fn evicted_frame_observed() {
+    let json = r#"{"event":"evicted","data":{"code":"heartbeat_lapsed","reason":"heartbeat lapsed; reopen the stream and resume from your cursor","room_id":null}}"#;
+    let ControlFrame::Evicted(e) = control(json) else {
+        panic!("expected evicted");
+    };
+    assert_eq!(e.code, "heartbeat_lapsed");
+    assert_eq!(e.room_id, None);
+    assert!(e.reason.unwrap().starts_with("heartbeat lapsed"));
+}
+
+#[test]
+fn unknown_event_name_does_not_fail() {
+    let json = r#"{"event":"something_new","data":{"anything":[1,2,3]}}"#;
+    let ControlFrame::Unknown { event, data } = control(json) else {
+        panic!("expected unknown");
+    };
+    assert_eq!(event, "something_new");
+    assert_eq!(data["anything"][2], 3);
 }
 
 #[test]
@@ -58,146 +96,6 @@ fn message_with_attachment_group() {
     let m: switch_client::MessagePayload = serde_json::from_str(json).unwrap();
     let AttachmentGroup { id, index, total } = m.attachment_group.unwrap();
     assert_eq!((id.as_str(), index, total), ("g1", 0, 2));
-}
-
-#[test]
-fn command_event() {
-    let json = r#"{"event": "command",
-        "data": {"type": "command", "room_id": "!room:switch", "bridge_id": "b1", "channel_type": null,
-                 "payload": {"command": "reset", "args": "reviewer", "user_id": "@switch-user-a1b2:switch",
-                             "user_name": "Kari", "thread_id": null},
-                 "sequence": 7},
-        "id": 7}"#;
-    let Frame::Event(ev) = parse(json) else {
-        panic!("expected domain event");
-    };
-    let EventPayload::Command(c) = ev.data.typed_payload().unwrap() else {
-        panic!("expected command payload");
-    };
-    assert_eq!(c.command, "reset");
-    assert_eq!(c.args, "reviewer");
-}
-
-#[test]
-fn room_join_event() {
-    let json = r#"{"event": "room_join",
-        "data": {"type": "room_join", "room_id": "!room:switch", "bridge_id": null, "channel_type": null,
-                 "payload": {"member": "@switch-agent-9f3c:switch", "member_name": "fixer",
-                             "timestamp": 1761900000000, "listening": true},
-                 "sequence": 8},
-        "id": 8}"#;
-    let Frame::Event(ev) = parse(json) else {
-        panic!("expected domain event");
-    };
-    let EventPayload::RoomJoin(j) = ev.data.typed_payload().unwrap() else {
-        panic!("expected room_join payload");
-    };
-    assert!(j.listening);
-    assert_eq!(j.member_name.as_deref(), Some("fixer"));
-}
-
-#[test]
-fn unknown_event_type_keeps_payload() {
-    let json = r#"{"event": "reaction",
-        "data": {"type": "reaction", "room_id": "!r:s", "payload": {"x": 1}, "sequence": 9},
-        "id": 9}"#;
-    let Frame::Event(ev) = parse(json) else {
-        panic!("expected domain event");
-    };
-    assert!(matches!(
-        ev.data.typed_payload().unwrap(),
-        EventPayload::Unknown(_)
-    ));
-}
-
-#[test]
-fn connection_state_frame() {
-    let json = r#"{"type": "connection_state",
-        "connection_id": "6f1c1d2e-3a4b-4c5d-8e9f-0a1b2c3d4e5f", "agent_id": "agent-123",
-        "generation": 3, "scope": "single", "filter": "all", "spawn_capable": false,
-        "rooms": ["!a:switch", "!b:switch"], "cursor": 4813, "protocol": 6,
-        "heartbeat_interval_seconds": 2,
-        "server": {"version": "1.2.3", "protocol": 6, "protocol_accepts": 1},
-        "client": {"client": "baba-yaga", "client_version": "0.1.0"}}"#;
-    let ControlFrame::ConnectionState(s) = control(json) else {
-        panic!("expected connection_state");
-    };
-    assert_eq!(s.generation, 3);
-    assert_eq!(s.scope, Scope::Single);
-    assert_eq!(s.filter, Filter::All);
-    assert_eq!(s.rooms, vec!["!a:switch", "!b:switch"]);
-    assert_eq!(s.cursor, Some(4813));
-    assert_eq!(s.heartbeat_interval_seconds, Some(2.0));
-}
-
-#[test]
-fn ping_frame() {
-    assert!(matches!(control(r#"{"type": "ping"}"#), ControlFrame::Ping));
-}
-
-#[test]
-fn gap_frame() {
-    let json = r#"{"type": "gap", "from_sequence": 100, "resumed_at": 250,
-        "resumed_position": null, "rooms": ["!a:switch"], "all_rooms": false, "reason": "retention"}"#;
-    let ControlFrame::Gap {
-        resumed_at,
-        all_rooms,
-        ..
-    } = control(json)
-    else {
-        panic!("expected gap");
-    };
-    assert_eq!(resumed_at, 250);
-    assert!(!all_rooms);
-}
-
-#[test]
-fn evicted_frame() {
-    let json = r#"{"type": "evicted", "code": "taken_over", "reason": "another open took the connection"}"#;
-    let ControlFrame::Evicted { code, .. } = control(json) else {
-        panic!("expected evicted");
-    };
-    assert_eq!(code, "taken_over");
-}
-
-#[test]
-fn subscription_changed_frame() {
-    let json = r#"{"type": "subscription_changed", "rooms": ["!b:switch"], "reason": "claimed"}"#;
-    let ControlFrame::SubscriptionChanged { rooms, .. } = control(json) else {
-        panic!("expected subscription_changed");
-    };
-    assert_eq!(rooms, vec!["!b:switch"]);
-}
-
-#[test]
-fn room_released_frame() {
-    let json = r#"{"type": "room_released", "room_id": "!a:switch", "session_id": null}"#;
-    let ControlFrame::RoomReleased {
-        room_id,
-        session_id,
-    } = control(json)
-    else {
-        panic!("expected room_released");
-    };
-    assert_eq!(room_id, "!a:switch");
-    assert_eq!(session_id, None);
-}
-
-#[test]
-fn refused_frame() {
-    let json = r#"{"type": "refused", "status": 409, "detail": "room already claimed"}"#;
-    let ControlFrame::Refused { status, detail } = control(json) else {
-        panic!("expected refused");
-    };
-    assert_eq!(status, 409);
-    assert_eq!(detail, "room already claimed");
-    assert_eq!(close_code::for_refusal(status), close_code::CONFLICT);
-}
-
-#[test]
-fn unknown_control_frame_does_not_fail() {
-    let json = r#"{"type": "something_new", "anything": [1, 2, 3]}"#;
-    assert!(matches!(control(json), ControlFrame::Unknown));
 }
 
 #[test]

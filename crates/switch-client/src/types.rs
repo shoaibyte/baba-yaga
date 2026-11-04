@@ -235,10 +235,50 @@ impl ConnectOptions {
 // Frames
 // ---------------------------------------------------------------------------
 
-/// One JSON text message on the socket: a domain event (carries `event` and
-/// `id`) or a control frame (carries `type`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(untagged)]
+/// One JSON text message on the socket, as received. Every server frame,
+/// control or domain, is `{"event": "<name>", "data": {...}}`; only domain
+/// events add `"id": <u64>`. Observed on switch-core 0.31, agent-protocol 9.
+/// Turn it into a [`Frame`] with [`RawFrame::into_frame`].
+#[derive(Debug, Clone, Deserialize)]
+pub struct RawFrame {
+    pub event: String,
+    #[serde(default)]
+    pub data: Value,
+    #[serde(default)]
+    pub id: Option<u64>,
+}
+
+impl RawFrame {
+    /// Dispatch on `event`. Fails only when a known event's `data` does not
+    /// match its type; an unknown event name becomes [`ControlFrame::Unknown`].
+    pub fn into_frame(self) -> Result<Frame, serde_json::Error> {
+        let RawFrame { event, data, id } = self;
+        Ok(match event.as_str() {
+            "message" | "command" | "room_join" => Frame::Event(DomainEvent {
+                data: serde_json::from_value(data)?,
+                id: id.unwrap_or(0),
+                event,
+            }),
+            "connection_state" => {
+                Frame::Control(ControlFrame::ConnectionState(serde_json::from_value(data)?))
+            }
+            "ping" => Frame::Control(ControlFrame::Ping),
+            "gap" => Frame::Control(ControlFrame::Gap(serde_json::from_value(data)?)),
+            "evicted" => Frame::Control(ControlFrame::Evicted(serde_json::from_value(data)?)),
+            "subscription_changed" => Frame::Control(ControlFrame::SubscriptionChanged(
+                serde_json::from_value(data)?,
+            )),
+            "room_released" => {
+                Frame::Control(ControlFrame::RoomReleased(serde_json::from_value(data)?))
+            }
+            "refused" => Frame::Control(ControlFrame::Refused(serde_json::from_value(data)?)),
+            _ => Frame::Control(ControlFrame::Unknown { event, data }),
+        })
+    }
+}
+
+/// A decoded frame: a domain event (carries `id`) or a control frame.
+#[derive(Debug, Clone)]
 pub enum Frame {
     Event(DomainEvent),
     Control(ControlFrame),
@@ -293,63 +333,29 @@ pub enum EventPayload {
     Unknown(Value),
 }
 
-/// Control frames, tagged by `type`. They carry no `id` and are never filtered.
-// TODO(verify): the docs show the JSON shape of the domain envelope and of the
-// pong, but not of control frames. Assumed flat `{"type": "...", ...fields}`
-// like the pong.
+/// Control frames, named by the envelope's `event`. They carry no `id` and
+/// are never filtered.
 // TODO(verify): the classification diagram on agent-events lists four control
 // frames; agent-connection lists seven (adds ping, refused, room_released).
 // Following agent-connection, which is the page that defines them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Debug, Clone)]
 pub enum ControlFrame {
     /// Always the first frame on a connection.
     ConnectionState(ConnectionState),
     /// Answer immediately with a `Pong`, before processing events.
     Ping,
-    Gap {
-        #[serde(default)]
-        from_sequence: Option<u64>,
-        /// Take this as the new cursor.
-        resumed_at: u64,
-        #[serde(default)]
-        resumed_position: Option<Value>,
-        #[serde(default)]
-        rooms: Vec<String>,
-        /// True when the loss covers every room the agent is in.
-        #[serde(default)]
-        all_rooms: bool,
-        #[serde(default)]
-        reason: Option<String>,
-    },
-    Evicted {
-        /// `taken_over` (final), `heartbeat_lapsed`, `no_stream`, `unfenced`,
-        /// `connection_error` (resume), or `closed` (read `reason`).
-        code: String,
-        #[serde(default)]
-        reason: Option<String>,
-    },
-    SubscriptionChanged {
-        #[serde(default)]
-        rooms: Vec<String>,
-        #[serde(default)]
-        reason: Option<String>,
-    },
+    Gap(Gap),
+    Evicted(Evicted),
+    SubscriptionChanged(SubscriptionChanged),
     /// Sent only to clients declaring agent-protocol 6 or later.
-    RoomReleased {
-        room_id: String,
-        #[serde(default)]
-        session_id: Option<String>,
-    },
+    RoomReleased(RoomReleased),
     /// Sent at open just before the socket closes with 4000 + `status`.
-    Refused {
-        status: u16,
-        #[serde(default)]
-        detail: String,
+    Refused(Refused),
+    /// Any event name this client does not know yet, with its `data` kept.
+    Unknown {
+        event: String,
+        data: Value,
     },
-    /// Any frame type this client does not know yet.
-    #[serde(other)]
-    Unknown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -365,14 +371,16 @@ pub struct ConnectionState {
     /// The covered room set, sorted. The server's answer, not an echo.
     #[serde(default)]
     pub rooms: Vec<String>,
-    // TODO(verify): the docs do not say whether `cursor` can be null on a
-    // first connect at head.
+    /// `0` on a first connect at head (observed).
     #[serde(default)]
     pub cursor: Option<u64>,
+    /// Per-stream positions, e.g. `{"s": 4294967296, "r:<room_id>": 14}`.
+    /// Shape observed, not documented, so kept as raw JSON.
+    #[serde(default)]
+    pub position: Option<Value>,
     #[serde(default)]
     pub protocol: Option<u32>,
-    // TODO(verify): the docs say pings come "every 2 seconds" and also give
-    // this field. Prefer the field when present.
+    /// Ping interval. Present on agent-protocol 9 (observed `2.0`).
     #[serde(default)]
     pub heartbeat_interval_seconds: Option<f64>,
     #[serde(default)]
@@ -381,7 +389,60 @@ pub struct ConnectionState {
     pub client: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gap {
+    #[serde(default)]
+    pub from_sequence: Option<u64>,
+    /// Take this as the new cursor.
+    pub resumed_at: u64,
+    #[serde(default)]
+    pub resumed_position: Option<Value>,
+    #[serde(default)]
+    pub rooms: Vec<String>,
+    /// True when the loss covers every room the agent is in.
+    #[serde(default)]
+    pub all_rooms: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Evicted {
+    /// `taken_over` (final), `heartbeat_lapsed`, `no_stream`, `unfenced`,
+    /// `connection_error` (resume), or `closed` (read `reason`).
+    pub code: String,
+    #[serde(default)]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub room_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionChanged {
+    #[serde(default)]
+    pub rooms: Vec<String>,
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoomReleased {
+    pub room_id: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Refused {
+    pub status: u16,
+    #[serde(default)]
+    pub detail: String,
+}
+
 /// The only frame a client sends: `{"type": "pong", "cursor": 4813}`.
+// TODO(verify): server-to-client frames use the `{"event", "data"}` envelope
+// (observed on agent-protocol 9). This client-to-server shape is still the
+// documented flat one and has not been verified against the live server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename = "pong")]
 pub struct Pong {
