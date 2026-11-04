@@ -43,7 +43,11 @@ pub fn scan_dir(repo: &str, dir: &Path, call_analysis: bool) -> Result<Vec<Findi
         Some(0) | Some(1) => {
             let stdout =
                 String::from_utf8(output.stdout).context("osv-scanner output is not UTF-8")?;
-            let findings = parse(&stdout, repo, dir)?;
+            // osv-scanner reports absolute, symlink-resolved paths; strip
+            // the canonical root so `source_path` is repo-relative even when
+            // `dir` was given as a relative path.
+            let root = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+            let findings = parse(&stdout, repo, &root)?;
             if analyse {
                 let go: Vec<&Finding> = findings.iter().filter(|f| f.ecosystem == "Go").collect();
                 tracing::info!(
