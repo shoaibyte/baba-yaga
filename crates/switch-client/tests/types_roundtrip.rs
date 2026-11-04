@@ -1,8 +1,10 @@
 //! Frame fixtures: the control frames are verbatim from switch-core 0.31
 //! (agent-protocol 9); the message event is hand-written to the documented
-//! domain shape.
+//! domain shape. Fixtures marked "hand-written" have not been seen on the
+//! live server; their `data` follows the agent-connection and agent-events
+//! docs, wrapped in the observed envelope.
 
-use switch_client::types::AttachmentGroup;
+use switch_client::types::{close_code, AttachmentGroup};
 use switch_client::{
     Addressing, ConnectOptions, ConnectionModel, ControlFrame, EventPayload, Filter, Frame,
     IntegrationProfile, Pong, RawFrame, RegisterRequest, RegisterResponse, Scope, StartFrom,
@@ -86,6 +88,103 @@ fn unknown_event_name_does_not_fail() {
     };
     assert_eq!(event, "something_new");
     assert_eq!(data["anything"][2], 3);
+}
+
+// Hand-written.
+#[test]
+fn command_event() {
+    let json = r#"{"event":"command","data":{"type":"command","room_id":"!room:switch","bridge_id":"b1","channel_type":null,"payload":{"command":"reset","args":"reviewer","user_id":"@switch-user-a1b2:switch","user_name":"Kari","thread_id":null},"sequence":7},"id":7}"#;
+    let Frame::Event(ev) = parse(json) else {
+        panic!("expected domain event");
+    };
+    assert_eq!(ev.id, 7);
+    let EventPayload::Command(c) = ev.data.typed_payload().unwrap() else {
+        panic!("expected command payload");
+    };
+    assert_eq!(c.command, "reset");
+    assert_eq!(c.args, "reviewer");
+}
+
+// Hand-written.
+#[test]
+fn room_join_event() {
+    let json = r#"{"event":"room_join","data":{"type":"room_join","room_id":"!room:switch","bridge_id":null,"channel_type":null,"payload":{"member":"@switch-agent-9f3c:switch","member_name":"fixer","timestamp":1761900000000,"listening":true},"sequence":8},"id":8}"#;
+    let Frame::Event(ev) = parse(json) else {
+        panic!("expected domain event");
+    };
+    let EventPayload::RoomJoin(j) = ev.data.typed_payload().unwrap() else {
+        panic!("expected room_join payload");
+    };
+    assert!(j.listening);
+    assert_eq!(j.member_name.as_deref(), Some("fixer"));
+}
+
+// Hand-written. An unknown event name is a control frame even when it carries
+// an `id`; the id is dropped and `data` is kept.
+#[test]
+fn unknown_domain_event_becomes_unknown_control() {
+    let json = r#"{"event":"reaction","data":{"type":"reaction","room_id":"!r:s","payload":{"x":1},"sequence":9},"id":9}"#;
+    let ControlFrame::Unknown { event, data } = control(json) else {
+        panic!("expected unknown");
+    };
+    assert_eq!(event, "reaction");
+    assert_eq!(data["payload"]["x"], 1);
+}
+
+// Hand-written.
+#[test]
+fn gap_frame() {
+    let json = r#"{"event":"gap","data":{"from_sequence":100,"resumed_at":250,"resumed_position":null,"rooms":["!a:switch"],"all_rooms":false,"reason":"retention"}}"#;
+    let ControlFrame::Gap(g) = control(json) else {
+        panic!("expected gap");
+    };
+    assert_eq!(g.from_sequence, Some(100));
+    assert_eq!(g.resumed_at, 250);
+    assert_eq!(g.rooms, vec!["!a:switch"]);
+    assert!(!g.all_rooms);
+}
+
+// Hand-written.
+#[test]
+fn subscription_changed_frame() {
+    let json =
+        r#"{"event":"subscription_changed","data":{"rooms":["!b:switch"],"reason":"claimed"}}"#;
+    let ControlFrame::SubscriptionChanged(c) = control(json) else {
+        panic!("expected subscription_changed");
+    };
+    assert_eq!(c.rooms, vec!["!b:switch"]);
+    assert_eq!(c.reason.as_deref(), Some("claimed"));
+}
+
+// Hand-written.
+#[test]
+fn room_released_frame() {
+    let json = r#"{"event":"room_released","data":{"room_id":"!a:switch","session_id":null}}"#;
+    let ControlFrame::RoomReleased(r) = control(json) else {
+        panic!("expected room_released");
+    };
+    assert_eq!(r.room_id, "!a:switch");
+    assert_eq!(r.session_id, None);
+}
+
+// Hand-written.
+#[test]
+fn refused_frame() {
+    let json = r#"{"event":"refused","data":{"status":409,"detail":"room already claimed"}}"#;
+    let ControlFrame::Refused(r) = control(json) else {
+        panic!("expected refused");
+    };
+    assert_eq!(r.status, 409);
+    assert_eq!(r.detail, "room already claimed");
+    assert_eq!(close_code::for_refusal(r.status), close_code::CONFLICT);
+}
+
+// Hand-written. A known event whose `data` does not match its type is an
+// error, not `Unknown`.
+#[test]
+fn malformed_known_control_frame_errors() {
+    let raw: RawFrame = serde_json::from_str(r#"{"event":"gap","data":{"rooms":[]}}"#).unwrap();
+    assert!(raw.into_frame().is_err());
 }
 
 #[test]
