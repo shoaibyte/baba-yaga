@@ -3,12 +3,9 @@
 
 mod audit;
 mod config;
-// Used by the workflow, which is not written yet.
-#[allow(dead_code)]
 mod room;
 mod scanner;
 mod scheduler;
-#[allow(dead_code)]
 mod state;
 mod workflow;
 

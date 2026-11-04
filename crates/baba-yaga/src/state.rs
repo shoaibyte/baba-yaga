@@ -117,6 +117,7 @@ impl State {
         Self::init(conn)
     }
 
+    #[cfg(test)]
     pub fn open_in_memory() -> Result<Self> {
         Self::init(Connection::open_in_memory()?)
     }
@@ -273,6 +274,8 @@ impl State {
         Ok(out)
     }
 
+    // Used by the audit log, a later commit; remove this allow there.
+    #[allow(dead_code)]
     pub fn meta(&self, key: &str) -> Result<Option<String>> {
         Ok(self
             .conn
@@ -282,6 +285,7 @@ impl State {
             .optional()?)
     }
 
+    #[allow(dead_code)]
     pub fn set_meta(&self, key: &str, value: &str) -> Result<()> {
         self.conn.execute(
             "INSERT INTO meta (key, value) VALUES (?1, ?2)

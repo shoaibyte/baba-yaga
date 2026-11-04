@@ -4,6 +4,7 @@
 room = "!replace-me:switch"
 
 # Cron with a seconds field: sec min hour day-of-month month day-of-week.
+# Evaluated in UTC.
 # Weekdays at 07:00.
 schedule = "0 0 7 * * Mon-Fri"
 
@@ -15,6 +16,10 @@ min_severity = 7.0
 # Go reachability via osv-scanner call analysis (default true). Needs `go` on
 # PATH and a module that builds; skipped with a log line otherwise.
 call_analysis = true
+
+# Agent that approved findings are handed to with a targeted message
+# (its name in list_participants). Leave unset to send nothing.
+# fixer_agent = "patrol-fixer"
 
 [[repos]]
 name = "api"

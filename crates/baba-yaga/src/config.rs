@@ -11,7 +11,7 @@ pub struct Config {
     /// Switch room id the patrol reports to.
     pub room: String,
     /// Cron expression with a seconds field, as the `cron` crate expects:
-    /// `sec min hour day-of-month month day-of-week [year]`.
+    /// `sec min hour day-of-month month day-of-week [year]`. Evaluated in UTC.
     pub schedule: String,
     /// SQLite database holding finding state.
     pub state_path: PathBuf,
@@ -24,6 +24,10 @@ pub struct Config {
     /// with a log line, when `go` is not on PATH.
     #[serde(default = "default_true")]
     pub call_analysis: bool,
+    /// Agent name (as in `list_participants`) that approved findings are
+    /// handed to with a targeted message. Unset: approvals send nothing.
+    #[serde(default)]
+    pub fixer_agent: Option<String>,
 }
 
 fn default_true() -> bool {
