@@ -478,18 +478,27 @@ pub(crate) fn is_fixer(sender_name: &str, fixer: &str) -> bool {
     norm(sender_name) == norm(fixer)
 }
 
-/// The first token in `body` that starts with "http" or contains "fix/",
-/// without surrounding quotes, brackets or trailing punctuation.
+/// The PR or branch the fixer reported: the first `http` link in `body`,
+/// or, when there is none, the first token containing "fix/". Markdown and
+/// punctuation around it are dropped: quotes, brackets, `**bold**`,
+/// `_italic_`, `[text](url)` and trailing ".,;:!?".
 pub(crate) fn pr_link(body: &str) -> Option<String> {
-    body.split_whitespace()
-        .map(|t| {
-            let wrap = |c: char| matches!(c, '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']');
-            t.trim_start_matches(wrap).trim_end_matches(|c: char| {
-                wrap(c) || matches!(c, '.' | ',' | ';' | ':' | '!' | '?')
-            })
-        })
-        .find(|t| t.starts_with("http") || t.contains("fix/"))
-        .map(str::to_string)
+    let wrap = |c: char| {
+        matches!(
+            c,
+            '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | '*' | '_' | '~'
+        )
+    };
+    let clean = |t: &str| -> String {
+        t.trim_start_matches(wrap)
+            .trim_end_matches(|c: char| wrap(c) || matches!(c, '.' | ',' | ';' | ':' | '!' | '?'))
+            .to_string()
+    };
+    let tokens = || body.split_whitespace();
+    tokens()
+        .find_map(|t| t.find("http").map(|i| clean(&t[i..])))
+        .filter(|l| !l.is_empty())
+        .or_else(|| tokens().map(clean).find(|t| t.contains("fix/")))
 }
 
 /// What a fixer message did to state.
@@ -1145,12 +1154,12 @@ mod tests {
             moved,
             FixerReply::PrOpen {
                 key: g.key.clone(),
-                link: "fix/lodash-4.17.21".to_string()
+                link: "https://github.com/o/r/pull/3".to_string()
             }
         );
         let row = state.get(&g.key).unwrap().unwrap();
         assert_eq!(row.status, Status::PrOpen);
-        assert_eq!(row.pr_url.as_deref(), Some("fix/lodash-4.17.21"));
+        assert_eq!(row.pr_url.as_deref(), Some("https://github.com/o/r/pull/3"));
 
         // Only the first reply after assignment counts.
         let again = track_fixer_reply(
@@ -1431,16 +1440,42 @@ mod tests {
     }
 
     #[test]
-    fn pr_link_takes_first_url_or_fix_branch() {
+    fn pr_link_prefers_a_url_over_a_branch() {
         assert_eq!(
             pr_link("Opened https://github.com/o/r/pull/3."),
             Some("https://github.com/o/r/pull/3".into())
         );
+        // The reply that stored "**fix/lodash-4.18.1**" on 2026-11-06.
+        assert_eq!(
+            pr_link(
+                "Pushed **fix/lodash-4.18.1**, PR: https://github.com/shoaibyte/baba-yaga/pull/2\n\
+                 - **Diff:** samples/node package.json and package-lock.json"
+            ),
+            Some("https://github.com/shoaibyte/baba-yaga/pull/2".into())
+        );
         assert_eq!(
             pr_link("Branch fix/lodash pushed, see https://x"),
-            Some("fix/lodash".into())
+            Some("https://x".into())
+        );
+        assert_eq!(
+            pr_link("PR: [#3](https://github.com/o/r/pull/3)."),
+            Some("https://github.com/o/r/pull/3".into())
+        );
+        assert_eq!(
+            pr_link("PR: <https://github.com/o/r/pull/4>"),
+            Some("https://github.com/o/r/pull/4".into())
+        );
+        // No URL: the branch, without its markdown.
+        assert_eq!(
+            pr_link("Pushed **fix/lodash-4.18.1**, gh is not logged in."),
+            Some("fix/lodash-4.18.1".into())
+        );
+        assert_eq!(
+            pr_link("Pushed `fix/lodash-4.18.1`."),
+            Some("fix/lodash-4.18.1".into())
         );
         assert_eq!(pr_link("done"), None);
+        assert_eq!(pr_link("On it: bumping lodash 4.18.0 to 4.18.1."), None);
     }
 
     fn t0() -> DateTime<Utc> {
