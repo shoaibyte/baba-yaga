@@ -1,2 +1,73 @@
+# Patrol room and fixer agent for Baba-Yaga.
+#
+# Format: Switch template language, version 1
+# (https://github.com/sandbox-quantum/switch/blob/main/docs/TEMPLATES.md).
+# Import it in Switch Console under Templates, Import template.
+#
+# What it creates: one Console-managed fixer agent, "{team}-fixer", and one
+# room, "{team}-security", with the fixer and you in it.
+#
+# What it cannot create: Baba-Yaga itself. Baba-Yaga is a custom agent that
+# speaks the agent protocol from its own Rust client, and a template can only
+# create agents that a provider (Claude Code, Codex, ...) runs. Set it up by
+# hand, once, before or after running this template:
+#
+#   1. Register it:   cargo run -p switch-client --example register
+#      and copy the printed SWITCH_AGENT_ID and SWITCH_AGENT_KEY into .env.
+#   2. Invite it into the room this template made. On Discord:
+#        /invite-agent agent:baba_yaga
+#
+# The fixer's name is "{team}-fixer"; set fixer_agent in baba-yaga.toml to
+# the same name ("patrol-fixer" with the default team).
 version: 1
-# TODO: define the patrol template format.
+
+params:
+  team:
+    type: string
+    label: Team name
+    description: Prefix for the fixer agent and the room.
+    default: patrol
+    pattern: "[a-z0-9][a-z0-9._-]*"
+  provider:
+    type: provider
+    default: [claude, $first]
+  bridge:
+    type: bridge
+    default: [$first]
+  location:
+    type: location
+    default: local
+    input: advanced
+  directory:
+    type: directory
+    default: "{$agents_dir}/{agent}"
+    input: advanced
+
+agent:
+  name: "{team}-fixer"
+  display_name: "{team}-fixer"
+  description: Bumps one vulnerable package per finding on a branch and opens a PR. Never merges.
+  provider: "{provider}"
+  location: "{location}"
+  directory: "{directory}"
+  addressing: anyone
+  auto_mode: true
+  auto_approve: false
+  instructions: |
+    You are the fixer. You only act when @baba_yaga hands you a finding in a thread. The message names a repo path, an ecosystem, a package, the current version and fix versions. Create a branch fix/<package>-<version> from main, bump exactly that package using the ecosystem's tool, run the build or tests that exist, commit, push, open a PR if gh works, and reply in the thread with branch, PR link, a one-line diff summary and whether the build passed. Prefer a non-deprecated fix version. Never merge. Never touch other packages.
+
+room:
+  name: "{team}-security"
+  bridge: "{bridge}"
+  description: "Dependency vulnerability patrol: findings, fixes, approvals"
+  instructions: |
+    Baba-Yaga (a custom agent registered through the API) posts one thread per vulnerable package. Humans reply in the thread with @baba_yaga approve, snooze 30d, or reject. On approve, Baba-Yaga hands the finding to the fixer in the same thread. The fixer bumps one package on a branch and opens a PR; it never merges.
+  agents: ["{team}-fixer"]
+  users: ["{$creator}"]
+
+kickoff: "@{team}-fixer introduce yourself in one line and say you are waiting for Baba-Yaga."
+
+form:
+  advanced:
+    label: Advanced
+    open: false
