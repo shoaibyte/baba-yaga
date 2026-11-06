@@ -2,6 +2,7 @@
 
 pub mod api;
 pub mod discover;
+pub mod doctor;
 pub mod envfile;
 pub mod init;
 pub mod prompt;

@@ -72,6 +72,8 @@ pub trait SetupApi {
     async fn check_key(&self, base: &Url, agent: &Agent) -> Result<()>;
     async fn agent_detail(&self, base: &Url, agent: &Agent) -> Result<AgentInfo>;
     async fn list_rooms(&self, base: &Url, agent: &Agent) -> Result<Vec<Room>>;
+    /// The agent names in a room, from `get_room_detail`.
+    async fn room_agents(&self, base: &Url, agent: &Agent, room_id: &str) -> Result<Vec<String>>;
     /// Gateway admin login, then open the agent's addressing (empty rules).
     async fn open_addressing(
         &self,
@@ -174,6 +176,20 @@ impl SetupApi for Live {
             .map_err(explain)?;
         Ok(parse_rooms(&v))
     }
+
+    async fn room_agents(&self, base: &Url, agent: &Agent, room_id: &str) -> Result<Vec<String>> {
+        let v: Value = Self::http(base)
+            .call_op(
+                &agent.key,
+                &agent.id,
+                "get_room_detail",
+                json!({ "room_id": room_id }),
+                None,
+            )
+            .await
+            .map_err(explain)?;
+        parse_room_agents(&v)
+    }
     async fn open_addressing(
         &self,
         base: &Url,
@@ -259,6 +275,18 @@ pub fn parse_rooms(v: &Value) -> Vec<Room> {
         .collect()
 }
 
+pub fn parse_room_agents(v: &Value) -> Result<Vec<String>> {
+    v.get("agent_names")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .context("get_room_detail has no agent_names")
+}
+
 pub fn parse_agent_detail(v: &Value) -> AgentInfo {
     AgentInfo {
         name: v
@@ -290,6 +318,8 @@ pub mod fake {
         pub agents: RefCell<Vec<(String, String)>>,
         pub addressing_open: RefCell<bool>,
         pub rooms: RefCell<Vec<Room>>,
+        /// Agent names in each room, by room id.
+        pub room_agents: Vec<(String, Vec<String>)>,
         pub admin: Option<(String, String)>,
         /// Every call, with secrets left out.
         pub calls: RefCell<Vec<String>>,
@@ -372,6 +402,17 @@ pub mod fake {
             Ok(rooms)
         }
 
+        async fn room_agents(&self, _: &Url, a: &Agent, room_id: &str) -> Result<Vec<String>> {
+            self.log(format!("room_agents {room_id}"));
+            self.known(a)?;
+            Ok(self
+                .room_agents
+                .iter()
+                .find(|(r, _)| r == room_id)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_default())
+        }
+
         async fn open_addressing(
             &self,
             _: &Url,
@@ -427,6 +468,14 @@ mod tests {
             parse_agent_detail(&json!({"name": "x"})).addressing_open(),
             None
         );
+
+        let room = json!({"id": "r1", "agent_names": ["baba_yaga", "patrol-fixer"],
+                          "agent_statuses": {"baba_yaga": "disconnected"}});
+        assert_eq!(
+            parse_room_agents(&room).unwrap(),
+            vec!["baba_yaga".to_string(), "patrol-fixer".to_string()]
+        );
+        assert!(parse_room_agents(&json!({"id": "r1"})).is_err());
     }
 
     #[test]

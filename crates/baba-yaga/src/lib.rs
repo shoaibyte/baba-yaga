@@ -52,6 +52,14 @@ enum Cmd {
         #[arg(long = "repo", value_name = "PATH_OR_URL")]
         repos: Vec<String>,
     },
+    /// Check everything `serve` needs, read-only: tools, .env, the server,
+    /// the agent key, addressing, the room, the config, the repos and the
+    /// fixer. Safe while `serve` runs. Exits 1 if a check fails.
+    Doctor {
+        /// The env file to read.
+        #[arg(long, default_value = ".env")]
+        env_file: PathBuf,
+    },
     /// Connect to Switch and run the patrol on its schedule.
     Serve,
     /// Scan once, post each package with findings as a thread, and exit.
@@ -106,9 +114,9 @@ async fn run_async() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    if !matches!(cli.command, Cmd::Init { .. }) {
+    if !matches!(cli.command, Cmd::Init { .. } | Cmd::Doctor { .. }) {
         // A missing .env is fine; the environment may already be set.
-        // `init` reads its own --env-file instead.
+        // `init` and `doctor` read their own --env-file instead.
         dotenvy::dotenv().ok();
     }
     match cli.command {
@@ -117,6 +125,7 @@ async fn run_async() -> Result<()> {
             env_file,
             repos,
         } => init(cli.config, env_file, repos, non_interactive).await,
+        Cmd::Doctor { env_file } => doctor(cli.config, env_file).await,
         Cmd::Serve => workflow::serve(&Config::load(&cli.config)?).await,
         Cmd::Report {
             repo,
@@ -150,20 +159,8 @@ async fn init(
     repos: Vec<String>,
     non_interactive: bool,
 ) -> Result<()> {
-    use setup::{envfile, init, prompt};
-    // The env file first, then the environment on top, as `serve` sees it.
-    let mut known = envfile::read(&env_file)?;
-    for key in [
-        setup::SWITCH_URL,
-        setup::SWITCH_AGENT_ID,
-        setup::SWITCH_AGENT_KEY,
-        setup::SWITCH_REGISTRATION_KEY,
-        setup::SWITCH_ROOM_ID,
-    ] {
-        if let Ok(v) = std::env::var(key) {
-            known.insert(key.to_string(), v);
-        }
-    }
+    use setup::{init, prompt};
+    let known = known_env(&env_file)?;
     let opts = init::Options {
         env_file,
         config,
@@ -183,6 +180,39 @@ async fn init(
             .run()
             .await
     }
+}
+
+/// The SWITCH_* values from `env_file`, with the environment on top, as
+/// `serve` sees them (dotenv does not override what is already set).
+fn known_env(env_file: &Path) -> Result<std::collections::BTreeMap<String, String>> {
+    let mut known = setup::envfile::read(env_file)?;
+    for key in [
+        setup::SWITCH_URL,
+        setup::SWITCH_AGENT_ID,
+        setup::SWITCH_AGENT_KEY,
+        setup::SWITCH_REGISTRATION_KEY,
+        setup::SWITCH_ROOM_ID,
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            known.insert(key.to_string(), v);
+        }
+    }
+    Ok(known)
+}
+
+async fn doctor(config: PathBuf, env_file: PathBuf) -> Result<()> {
+    use setup::doctor;
+    let inputs = doctor::Inputs {
+        known: known_env(&env_file)?,
+        env_file,
+        config,
+    };
+    let checks = doctor::run(&setup::api::Live, &doctor::System, &inputs).await;
+    print!("{}", doctor::format(&checks));
+    if doctor::any_failed(&checks) {
+        std::process::exit(1);
+    }
+    Ok(())
 }
 
 /// State file `report` uses when there is no config file.
