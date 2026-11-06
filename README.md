@@ -4,6 +4,13 @@ Baba-Yaga is a dependency vulnerability patrol that lives in a Switch room. On a
 
 Demo video: TBD
 
+## Where to look
+
+- [`crates/switch-client/src/ws.rs`](crates/switch-client/src/ws.rs): the Switch agent protocol client, written by hand: WebSocket, ping and pong with the cursor, resume.
+- [`crates/baba-yaga/src/workflow.rs`](crates/baba-yaga/src/workflow.rs): the approval and handoff loop.
+- [`template/patrol.template.yaml`](template/patrol.template.yaml): the room template that creates the room and the fixer.
+- [`docs/NOTES.md`](docs/NOTES.md): everything we learned about Switch 0.31 that the docs do not say.
+
 ## How Switch is used
 
 Each of these Switch features carries part of the workflow:
@@ -50,19 +57,25 @@ From a clean clone, on macOS or Linux.
 2. Start the local Switch server from Switch Console and find its API address. Console runs the server on a random local port, which changes when Console restarts. Find it with:
 
    ```sh
-   ps eww $(pgrep -f switch_core.main) | tr ' ' '\n' | grep GATEWAY_PUBLIC_URL
+   ps eww -p $(pgrep -f switch_core.main) | tr ' ' '\n' | grep '^GATEWAY_PUBLIC_URL='
+   ```
+
+   The address is the value of `GATEWAY_PUBLIC_URL`, for example `http://localhost:51970`. Set `SWITCH_URL` to it, then check it:
+
+   ```sh
    curl -s "$SWITCH_URL/health"
    ```
 
-   The `curl` should print a healthy response once `SWITCH_URL` is set to that address.
-
-3. Connect Discord to the server, following https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord.
+3. Connect Discord to the server, following https://docs.switchagents.ai/switch-rooms/deploy/messaging-apps/discord. When Console asks to link your Discord user account, do it: that is what makes you the room owner (`sender_role: owner`) for the approval gate.
 
 4. Register Baba-Yaga and fill in `.env`:
 
+   The registration key is the `AGENT_REGISTRATION_TOKEN` the server was started with. Read it and put it in `.env` as `SWITCH_REGISTRATION_KEY`:
+
    ```sh
    cp .env.example .env
-   # Set SWITCH_URL, and SWITCH_REGISTRATION_KEY from the Gateway: API Keys, Create Registration Key.
+   ps eww -p $(pgrep -f switch_core.main) | tr ' ' '\n' | grep '^AGENT_REGISTRATION_TOKEN=' | cut -d= -f2-
+   # Set SWITCH_URL (step 2) and SWITCH_REGISTRATION_KEY (the value above) in .env.
    cargo run -p switch-client --example register
    # Copy the printed SWITCH_AGENT_ID and SWITCH_AGENT_KEY into .env. The key is shown once.
    ```
@@ -87,10 +100,21 @@ From a clean clone, on macOS or Linux.
    - **With the template:** in Switch Console, open Templates, select Import template, choose `template/patrol.template.yaml` and run it. It creates the agent `patrol-fixer` and the room `patrol-security`, and posts a kickoff to the fixer.
    - **By hand in Console:** create a room, then create a Claude Code agent named `patrol-fixer`, set Who can talk to your agent to Anyone, paste the instructions from the template's `instructions:` block, and add it to the room.
 
+   The fixer must accept messages from Anyone: Baba-Yaga is not one of your own agents, so with "Me and my agents" the fixer would ignore the handoff. The template sets this.
+
    Then invite Baba-Yaga into the room. In the Discord channel (verified on Discord):
 
    ```
    /invite-agent agent:baba_yaga
+   ```
+
+   The agent registered as baba-yaga, but the server stores the name as baba_yaga and Discord addresses it that way; Console-created agents like patrol-fixer keep their hyphen.
+
+   Get the room id from the rooms Baba-Yaga is in:
+
+   ```sh
+   set -a; . ./.env; set +a
+   curl -s -X POST -H "Authorization: Bearer $SWITCH_AGENT_KEY" -H 'Content-Type: application/json' -d '{}' "$SWITCH_URL/agents/$SWITCH_AGENT_ID/ops/list_rooms"
    ```
 
    Put the room id in `.env` as `SWITCH_ROOM_ID`, or in the config below as `room`.
@@ -110,7 +134,7 @@ From a clean clone, on macOS or Linux.
    RUST_LOG=info cargo run -p baba-yaga -- serve
    ```
 
-9. What you should see: the log says `connected`, and the room gets "Baba-Yaga online. Watching 1 repo. Next scan: ...". After the first scan, every vulnerable package has its own thread, with a command hint as the first reply. In a thread, `@baba_yaga approve` gets "Approved by you. Handed to patrol-fixer.", and the fixer's message appears in the same thread. Once the fixer replies with a branch or PR link, `@baba_yaga status` lists the package as `pr_open`.
+9. What you should see: the log says `connected`, and the room gets "Baba-Yaga online. Watching 1 repo. Next scan: ...". After the first scan, every vulnerable package has its own thread, with a command hint as the first reply. In a thread, `@baba_yaga approve` gets "Approved by <your Discord name>. Handed to patrol-fixer.", and the fixer's message appears in the same thread. The first time the fixer pushes, Console may show a permission prompt for its `git push`; allow it there. Once the fixer replies with a branch or PR link, `@baba_yaga status` lists the package as `pr_open`.
 
 Changes to `baba-yaga.toml` take effect when `serve` is restarted.
 
