@@ -30,3 +30,5 @@ cron = "0.17.0"
 chrono = "0.4.45"
 tempfile = "3.27.0"
 dotenvy = "0.15.7"
+# Hidden terminal input for keys and passwords in `bay init`.
+rpassword = "7.5.4"

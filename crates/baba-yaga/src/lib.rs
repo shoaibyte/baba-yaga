@@ -9,6 +9,7 @@ mod config;
 mod room;
 mod scanner;
 mod scheduler;
+mod setup;
 mod state;
 mod workflow;
 
@@ -36,6 +37,21 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Cmd {
+    /// Set up Switch, .env and the config step by step: find the server,
+    /// register the agent once, open its addressing, pick the room and
+    /// write baba-yaga.toml. Safe to run again; it keeps what works.
+    Init {
+        /// Take defaults and fail on any value that would need a question.
+        #[arg(long)]
+        non_interactive: bool,
+        /// The env file to read and write.
+        #[arg(long, default_value = ".env")]
+        env_file: PathBuf,
+        /// A repo to scan: local path or git URL. Repeat for more. Asked
+        /// for when not given.
+        #[arg(long = "repo", value_name = "PATH_OR_URL")]
+        repos: Vec<String>,
+    },
     /// Connect to Switch and run the patrol on its schedule.
     Serve,
     /// Scan once, post each package with findings as a thread, and exit.
@@ -82,8 +98,6 @@ pub fn run() -> Result<()> {
 }
 
 async fn run_async() -> Result<()> {
-    // A missing .env is fine; the environment may already be set.
-    dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
@@ -92,7 +106,17 @@ async fn run_async() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if !matches!(cli.command, Cmd::Init { .. }) {
+        // A missing .env is fine; the environment may already be set.
+        // `init` reads its own --env-file instead.
+        dotenvy::dotenv().ok();
+    }
     match cli.command {
+        Cmd::Init {
+            non_interactive,
+            env_file,
+            repos,
+        } => init(cli.config, env_file, repos, non_interactive).await,
         Cmd::Serve => workflow::serve(&Config::load(&cli.config)?).await,
         Cmd::Report {
             repo,
@@ -117,6 +141,47 @@ async fn run_async() -> Result<()> {
             workflow::report(opts).await
         }
         Cmd::Scan { repo, path, group } => scan(&cli.config, repo, path, group),
+    }
+}
+
+async fn init(
+    config: PathBuf,
+    env_file: PathBuf,
+    repos: Vec<String>,
+    non_interactive: bool,
+) -> Result<()> {
+    use setup::{envfile, init, prompt};
+    // The env file first, then the environment on top, as `serve` sees it.
+    let mut known = envfile::read(&env_file)?;
+    for key in [
+        setup::SWITCH_URL,
+        setup::SWITCH_AGENT_ID,
+        setup::SWITCH_AGENT_KEY,
+        setup::SWITCH_REGISTRATION_KEY,
+        setup::SWITCH_ROOM_ID,
+    ] {
+        if let Ok(v) = std::env::var(key) {
+            known.insert(key.to_string(), v);
+        }
+    }
+    let opts = init::Options {
+        env_file,
+        config,
+        repos,
+    };
+    let api = setup::api::Live;
+    let server = setup::discover::ConsoleProcess;
+    let mut out = std::io::stdout();
+    if non_interactive {
+        let mut p = prompt::NonInteractive;
+        init::Init::new(&api, &mut p, &server, &mut out, &opts, known)
+            .run()
+            .await
+    } else {
+        let mut p = prompt::Terminal;
+        init::Init::new(&api, &mut p, &server, &mut out, &opts, known)
+            .run()
+            .await
     }
 }
 
