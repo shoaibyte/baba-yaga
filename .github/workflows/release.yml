@@ -1,0 +1,106 @@
+# Release build, on a pushed tag v*: test, build both binaries (baba-yaga
+# and bay) for three targets, attach .tar.gz archives with .sha256 files and
+# an x86_64 .deb, and create the GitHub release.
+#
+# Actions are pinned to commit SHAs; the comment gives the release tag.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-15
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
+          # The oldest supported Ubuntu runner, so the binary's glibc
+          # requirement stays low.
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+    runs-on: ${{ matrix.os }}
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustup target add "$TARGET"
+
+      - name: Tag matches the crate version
+        shell: bash
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="baba-yaga"))')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match crate version $version" >&2
+            exit 1
+          fi
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET" -p baba-yaga
+
+      - name: Archive
+        shell: bash
+        run: |
+          name="baba-yaga-${GITHUB_REF_NAME}-${TARGET}"
+          mkdir -p "dist/$name"
+          cp "target/$TARGET/release/baba-yaga" "target/$TARGET/release/bay" \
+             LICENSE baba-yaga.example.toml "dist/$name/"
+          tar -C dist -czf "dist/$name.tar.gz" "$name"
+          rm -r "dist/$name"
+          cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256"
+
+      - name: Debian package
+        if: matrix.target == 'x86_64-unknown-linux-gnu'
+        run: |
+          # cargo-deb is a build tool here, not a crate dependency.
+          cargo install cargo-deb --version 3.8.0 --locked
+          cargo deb -p baba-yaga --no-build --target "$TARGET" --output dist/
+          cd dist && for f in *.deb; do sha256sum "$f" > "$f.sha256"; done
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.deb
+            dist/*.sha256
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          pattern: dist-*
+          merge-multiple: true
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -l dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag

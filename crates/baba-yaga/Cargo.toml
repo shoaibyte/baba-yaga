@@ -37,3 +37,25 @@ dotenvy.workspace = true
 url.workspace = true
 reqwest.workspace = true
 rpassword.workspace = true
+
+# `cargo deb` (installed in the release workflow only) builds the .deb from
+# this. Both binary names go to /usr/bin. osv-scanner is not packaged for
+# Ubuntu, so it is not a dependency; `bay doctor` reports it when missing.
+[package.metadata.deb]
+maintainer = "Shoaib"
+copyright = "2026, Shoaib"
+license-file = ["../../LICENSE", "0"]
+extended-description = """\
+Baba-Yaga scans repositories with osv-scanner, posts one Switch room thread \
+per vulnerable package, and hands approved findings to a fixer agent. \
+Installed as both baba-yaga and bay."""
+section = "devel"
+priority = "optional"
+# No Debian revision, so the file is baba-yaga_<version>_amd64.deb.
+revision = ""
+depends = "$auto, git"
+assets = [
+    ["target/release/baba-yaga", "usr/bin/", "755"],
+    ["target/release/bay", "usr/bin/", "755"],
+    ["../../baba-yaga.example.toml", "usr/share/doc/baba-yaga/", "644"],
+]
