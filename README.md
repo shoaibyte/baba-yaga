@@ -353,11 +353,12 @@ stateDiagram-v2
     pr_open --> resolved : no longer reported
     assigned --> open : new installed version, still vulnerable
     pr_open --> open : new installed version, still vulnerable
+    resolved --> open : reported again
 ```
 
 The diagram shows the main path. Snooze and reject are also accepted on a finding that is already approved or with the fixer. If the handoff fails, the finding stays `approved` and the thread says why.
 
-`resolved` means **the scanner no longer reports the package**, not that Baba-Yaga checked or merged a PR.
+`resolved` means **the scanner no longer reports the package**, not that Baba-Yaga checked or merged a PR. If a later scan reports it again, it returns to `open` in its old thread, with a "Reappeared" reply, ready to be approved again.
 
 </details>
 

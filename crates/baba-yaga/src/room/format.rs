@@ -200,6 +200,20 @@ pub fn render_reopened(group: &FindingGroup) -> String {
     ))
 }
 
+/// The thread reply for a resolved group that the scanner reports again.
+pub fn render_reappeared(group: &FindingGroup) -> String {
+    let fix = match fix(group) {
+        Some(v) => format!("fix {v}"),
+        None => "no fix released".to_string(),
+    };
+    limit(&format!(
+        "**Reappeared:** {} {} is reported again ({}, {fix}). Reply `{MENTION} approve` to hand it to the fixer.",
+        group.package,
+        short_version(&group.version),
+        advisories(group.vuln_ids().len())
+    ))
+}
+
 /// The task for the fixer agent, posted in the finding's thread. No mention:
 /// `send_targeted_message` adds the target's own. `repo_path` is the
 /// configured repo URL or local directory; the lockfile is the first

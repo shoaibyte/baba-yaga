@@ -140,6 +140,8 @@ pub struct Summary {
     /// Groups back to open because a fix changed the version but left
     /// advisories.
     pub reopened: usize,
+    /// Resolved groups back to open because the scan reports them again.
+    pub reappeared: usize,
     /// Names of the repos whose scan failed.
     pub failed_repos: Vec<String>,
 }
@@ -154,6 +156,7 @@ impl std::fmt::Display for Summary {
             (self.updates, "updated"),
             (self.gone, "resolved"),
             (self.reopened, "reopened"),
+            (self.reappeared, "reappeared"),
             (self.snoozed, "snoozed"),
         ] {
             if n > 0 {
@@ -364,6 +367,47 @@ pub(crate) async fn reopen_changed<P: RoomPoster>(
         reopened.push(key);
     }
     summary.reopened += reopened.len();
+    Ok(reopened)
+}
+
+/// Reopen every group in `groups` that state holds as resolved: the scanner
+/// stopped reporting it once and reports it again. Each is set back to open
+/// in its old thread, recorded at the scanned version (so `publish` posts no
+/// second update), and told so in the thread. A resolved group without a
+/// thread gets none here; `publish` then opens one. Returns the reopened
+/// keys.
+pub(crate) async fn reopen_reappeared<P: RoomPoster>(
+    state: &State,
+    poster: &P,
+    groups: &[FindingGroup],
+    now: DateTime<Utc>,
+    summary: &mut Summary,
+) -> Result<Vec<String>> {
+    let mut reopened = Vec::new();
+    for g in groups {
+        let key = g.key();
+        let Some(ex) = state.get(&key)? else {
+            continue;
+        };
+        if ex.status != Status::Resolved {
+            continue;
+        }
+        state.reopen(&key)?;
+        state.record(g, now)?;
+        tracing::info!(%key, version = %g.version, "reopened: reported again");
+        if let Some(thread_id) = &ex.thread_id {
+            // The state change stands even if the reply fails.
+            match poster.reply(thread_id, &format::render_reappeared(g)).await {
+                Ok(_) => state.mark_posted(&key, now)?,
+                Err(e) => {
+                    tracing::warn!(%key, error = %format!("{e:#}"), "reappeared reply not posted")
+                }
+            }
+            tokio::time::sleep(POST_GAP).await;
+        }
+        reopened.push(key);
+    }
+    summary.reappeared += reopened.len();
     Ok(reopened)
 }
 
@@ -610,6 +654,12 @@ impl Agent<'_> {
             reopen_changed(&self.state, &Live(&self.client), &groups, now, &mut summary).await?;
         for key in reopened {
             let line = audit::event_line(Utc::now(), &key, "reopened after version change");
+            self.audit.append(&self.client, &self.state, &line).await?;
+        }
+        let reappeared =
+            reopen_reappeared(&self.state, &Live(&self.client), &groups, now, &mut summary).await?;
+        for key in reappeared {
+            let line = audit::event_line(Utc::now(), &key, "reopened after reappearing");
             self.audit.append(&self.client, &self.state, &line).await?;
         }
         publish(
@@ -1203,6 +1253,74 @@ mod tests {
         let replies = poster.replies.borrow();
         assert!(replies[1..].iter().all(|(t, _)| t != "sw_lodash"));
         assert!(replies[1..].iter().any(|(t, _)| t == "sw_minimist"));
+    }
+
+    #[tokio::test]
+    async fn resolved_group_that_reappears_reopens_in_its_thread() {
+        let state = State::open_in_memory().unwrap();
+        let at = |package: &str, version: &str| {
+            let mut f = finding(package, "GHSA-1");
+            f.version = version.into();
+            f.fixed_version = Some("4.18.1".into());
+            scanner::group(vec![f]).remove(0)
+        };
+        // lodash was resolved in its thread; minimist was resolved without
+        // one; axios is rejected and must stay so.
+        let rows = [
+            (at("lodash", "4.18.0"), Status::Resolved, Some("sw_lodash")),
+            (at("minimist", "1.2.5"), Status::Resolved, None),
+            (at("axios", "0.21.1"), Status::Rejected, Some("sw_axios")),
+        ];
+        for (g, status, thread) in &rows {
+            state.record(g, t0()).unwrap();
+            if let Some(t) = thread {
+                state.set_thread(&g.key(), t, t0()).unwrap();
+                state.set_hint_posted(&g.key()).unwrap();
+            }
+            state.set_status(&g.key(), *status).unwrap();
+        }
+
+        let scan = vec![
+            at("lodash", "4.18.0"),
+            at("minimist", "1.2.5"),
+            at("axios", "0.21.1"),
+        ];
+        let poster = Recorder::default();
+        let mut summary = Summary::default();
+        let reopened = reopen_reappeared(&state, &poster, &scan, t0(), &mut summary)
+            .await
+            .unwrap();
+
+        assert_eq!(reopened, vec!["samples:npm:lodash", "samples:npm:minimist"]);
+        assert_eq!(summary.reappeared, 2);
+        let row = |k: &str| state.get(k).unwrap().unwrap();
+        assert_eq!(row("samples:npm:lodash").status, Status::Open);
+        assert_eq!(
+            row("samples:npm:lodash").thread_id.as_deref(),
+            Some("sw_lodash")
+        );
+        assert_eq!(row("samples:npm:minimist").status, Status::Open);
+        assert_eq!(row("samples:npm:axios").status, Status::Rejected);
+        assert_eq!(
+            poster.replies.borrow().as_slice(),
+            &[(
+                "sw_lodash".to_string(),
+                "**Reappeared:** lodash 4.18.0 is reported again (1 advisory, fix 4.18.1). \
+                 Reply `@baba_yaga approve` to hand it to the fixer."
+                    .to_string()
+            )]
+        );
+
+        // publish then posts nothing more for lodash, and opens a thread for
+        // minimist, which never had one.
+        publish(&scan, Some(&state), &poster, t0(), false, &mut summary)
+            .await
+            .unwrap();
+        assert_eq!(poster.posts.borrow().len(), 1);
+        assert!(poster.posts.borrow()[0].starts_with("minimist 1.2.5"));
+        let replies = poster.replies.borrow();
+        assert!(replies[1..].iter().all(|(t, _)| t != "sw_lodash"));
+        assert_eq!(summary.to_string(), "3 packages · 1 new · 2 reappeared");
     }
 
     #[test]
