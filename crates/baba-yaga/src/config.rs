@@ -70,6 +70,7 @@ mod tests {
         assert_eq!(config.repos[1].branch, None);
         assert_eq!(config.min_severity, Some(7.0));
         assert!(config.call_analysis);
+        assert_eq!(config.fixer_agent.as_deref(), Some("patrol-fixer"));
     }
 
     #[test]
@@ -79,7 +80,9 @@ mod tests {
             schedule = "0 0 7 * * *"
             state_path = "x.db"
         "#;
-        assert!(Config::parse(text).unwrap().call_analysis);
+        let config = Config::parse(text).unwrap();
+        assert!(config.call_analysis);
+        assert_eq!(config.fixer_agent, None);
     }
 
     #[test]

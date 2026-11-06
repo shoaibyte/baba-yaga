@@ -17,9 +17,10 @@ min_severity = 7.0
 # PATH and a module that builds; skipped with a log line otherwise.
 call_analysis = true
 
-# Agent that approved findings are handed to with a targeted message
-# (its name in list_participants). Leave unset to send nothing.
-# fixer_agent = "patrol-fixer"
+# Agent that approved findings are handed to with a targeted message in the
+# finding's thread (its name in list_participants, which is also its Discord
+# mention). Leave unset to send nothing.
+fixer_agent = "patrol-fixer"
 
 [[repos]]
 name = "api"
