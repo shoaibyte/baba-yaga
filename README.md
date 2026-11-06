@@ -116,7 +116,7 @@ Changes to `baba-yaga.toml` take effect when `serve` is restarted.
 
 ## Commands
 
-Address Baba-Yaga in the room. Approve, reject and snooze work only inside a finding's thread.
+Address Baba-Yaga in the room. Approve, reject and snooze work only inside a finding's thread. After the mention, the message must be exactly one command from the table, in any case, with trailing punctuation allowed. Any other message in a thread gets no reply, so people can talk there without triggering anything.
 
 | Command | Where | What it does |
 |---|---|---|

@@ -331,6 +331,12 @@ async fn post_hint<P: RoomPoster>(
     Ok(())
 }
 
+/// "No repo named x. Configured: a, b".
+fn unknown_repo_reply(name: &str, repos: &[Repo]) -> String {
+    let names: Vec<&str> = repos.iter().map(|r| r.name.as_str()).collect();
+    format!("No repo named {name}. Configured: {}", names.join(", "))
+}
+
 // ---------------------------------------------------------------------------
 // Fixer handoff
 // ---------------------------------------------------------------------------
@@ -612,6 +618,18 @@ impl Agent<'_> {
         }
         let command = commands::parse(&m.body);
         let who = m.sender_name.clone().unwrap_or_else(|| m.sender.clone());
+        // In a thread people talk to each other; only an exact command acts,
+        // and anything else gets no reply.
+        if command == Command::Unknown && m.thread_id.is_some() {
+            tracing::debug!(
+                seq = ev.id,
+                %who,
+                thread_id = ?m.thread_id,
+                body = %head(&m.body, LOG_BODY_CHARS),
+                "not a command; ignored"
+            );
+            return Ok(());
+        }
         tracing::info!(
             seq = ev.id,
             %who,
@@ -687,17 +705,34 @@ impl Agent<'_> {
                 &self.state.list_open(Utc::now())?,
                 &self.state.list_status(Status::Rejected)?,
             ),
-            Command::Scan { repo } => {
-                self.reply(thread, "Scanning now.").await?;
-                match self.scan_and_post(repo.as_deref()).await {
-                    Some(summary) => format!("Scan done: {summary}."),
-                    None => "Scan failed; see the agent log.".to_string(),
+            Command::Scan { repo } => match self.configured_repo(repo.as_deref()) {
+                Err(reply) => reply,
+                Ok(only) => {
+                    self.reply(thread, "Scanning now.").await?;
+                    match self.scan_and_post(only.as_deref()).await {
+                        Some(summary) => format!("Scan done: {summary}."),
+                        None => "Scan failed; see the agent log.".to_string(),
+                    }
                 }
-            }
+            },
             Command::Help => format::render_help(),
             Command::Unknown => format!("I did not understand that. Try {} help.", format::MENTION),
         };
         self.reply(thread, &reply).await
+    }
+
+    /// The configured name for `scan <name>`, matched case-insensitively,
+    /// or the reply that names the configured repos.
+    fn configured_repo(&self, name: Option<&str>) -> Result<Option<String>, String> {
+        let Some(name) = name else {
+            return Ok(None);
+        };
+        self.cfg
+            .repos
+            .iter()
+            .find(|r| r.name.eq_ignore_ascii_case(name))
+            .map(|r| Some(r.name.clone()))
+            .ok_or_else(|| unknown_repo_reply(name, &self.cfg.repos))
     }
 
     async fn record(&mut self, key: &str, action: &str, who: &str) -> Result<()> {
@@ -1007,6 +1042,19 @@ mod tests {
             .unwrap();
         assert!(reply.contains("handoff to patrol-fixer failed: 409: target not in room"));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
+    }
+
+    #[test]
+    fn unknown_repo_names_the_configured_ones() {
+        let repo = |n: &str| Repo {
+            name: n.into(),
+            url: format!("/src/{n}"),
+            branch: None,
+        };
+        assert_eq!(
+            unknown_repo_reply("smaples", &[repo("samples"), repo("web")]),
+            "No repo named smaples. Configured: samples, web"
+        );
     }
 
     #[tokio::test]
