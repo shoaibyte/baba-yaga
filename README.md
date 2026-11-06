@@ -69,23 +69,25 @@ From a clean clone, on macOS or Linux.
 
    Run the register example once. A second run returns 409 because the name is taken.
 
-5. Open Baba-Yaga's addressing so that people in the room can address it, then check the setting:
+5. Open Baba-Yaga's addressing through the Gateway API, so that people in the room can address it. An API-registered agent is owned by "Agent Bootstrap", so Console cannot edit it; an empty rules list means anyone may address it. With `.env` loaded (`set -a; . ./.env; set +a`):
 
    ```sh
-   set -a; . ./.env; set +a
-   curl -s -X POST "$SWITCH_URL/agents/$SWITCH_AGENT_ID/ops/update_agent_detail" \
-     -H "Authorization: Bearer $SWITCH_AGENT_KEY" -H "Content-Type: application/json" \
-     -d "{\"agent_id\": \"$SWITCH_AGENT_ID\", \"addressing\": \"anyone\"}"
-   curl -s -X POST "$SWITCH_URL/agents/$SWITCH_AGENT_ID/ops/get_agent_detail" \
-     -H "Authorization: Bearer $SWITCH_AGENT_KEY" -H "Content-Type: application/json" \
-     -d "{\"agent_id\": \"$SWITCH_AGENT_ID\"}"
+   # admin email/password are the GATEWAY_ADMIN_EMAIL / GATEWAY_ADMIN_PASSWORD the server was started with
+   # (Console: ps eww -p $(pgrep -f switch_core.main) | tr ' ' '\n' | grep '^GATEWAY_ADMIN_')
+   curl -s -c /tmp/gw.jar -X POST -H 'Content-Type: application/json' \
+     -d '{"email":"<admin email>","password":"<admin password>"}' \
+     "$SWITCH_URL/gateway/auth/login"
+   curl -s -b /tmp/gw.jar -X PUT -H 'Content-Type: application/json' \
+     -d '{"policy":{"rules":[]}}' \
+     "$SWITCH_URL/gateway/agents/$SWITCH_AGENT_ID/addressing-policy"
+   rm /tmp/gw.jar
    ```
 
 6. Create the room and the fixer. Either:
    - **With the template:** in Switch Console, open Templates, select Import template, choose `template/patrol.template.yaml` and run it. It creates the agent `patrol-fixer` and the room `patrol-security`, and posts a kickoff to the fixer.
    - **By hand in Console:** create a room, then create a Claude Code agent named `patrol-fixer`, set Who can talk to your agent to Anyone, paste the instructions from the template's `instructions:` block, and add it to the room.
 
-   Then invite Baba-Yaga into the room. In the Discord channel:
+   Then invite Baba-Yaga into the room. In the Discord channel (verified on Discord):
 
    ```
    /invite-agent agent:baba_yaga

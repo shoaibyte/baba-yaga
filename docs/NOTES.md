@@ -17,3 +17,17 @@
 - osv-scanner reports absolute, symlink-resolved manifest paths. `source_path` is made relative to the canonical scan root, so a relative `--path` works.
 - OSV lists git commit hashes as fixed "versions" for some PyPI advisories (requests, urllib3, certifi, idna), some starting with a digit (`74ea7cf…`). `highest_fixed` ignores anything that looks like a hash unless nothing else is listed.
 - The `cron` crate needs a seconds field: the 5-field `*/30 * * * *` is written `0 */30 * * * *`. baba-yaga evaluates schedules in UTC.
+- Addressing for an API-registered agent (verified 2026-11-04 on switch-core 0.31): `update_agent_detail` with the agent's own key is refused ("An agent can't change its own settings"), and Console cannot edit the agent because it is owned by "Agent Bootstrap". The Gateway API with the admin cookie works; an empty rules list means anyone may address the agent:
+
+  ```sh
+  # admin email/password are the GATEWAY_ADMIN_EMAIL / GATEWAY_ADMIN_PASSWORD the server was started with
+  # (Console: ps eww -p $(pgrep -f switch_core.main) | tr ' ' '\n' | grep '^GATEWAY_ADMIN_')
+  curl -s -c /tmp/gw.jar -X POST -H 'Content-Type: application/json' \
+    -d '{"email":"<admin email>","password":"<admin password>"}' \
+    "$SWITCH_URL/gateway/auth/login"
+  curl -s -b /tmp/gw.jar -X PUT -H 'Content-Type: application/json' \
+    -d '{"policy":{"rules":[]}}' \
+    "$SWITCH_URL/gateway/agents/$SWITCH_AGENT_ID/addressing-policy"
+  rm /tmp/gw.jar
+  ```
+- `/invite-agent agent:baba_yaga` adds the agent to the room on Discord (verified).
