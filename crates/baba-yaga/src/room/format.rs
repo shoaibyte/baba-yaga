@@ -198,7 +198,7 @@ pub fn render_reopened(group: &FindingGroup) -> String {
         None => "no fix released".to_string(),
     };
     limit(&format!(
-        "**Reopened:** installed {} still has {} ({fix}). Reply `{MENTION} approve` to hand it to the fixer again.",
+        "**Reopened:** installed {} still has {} ({fix}). Reply {MENTION} `approve` to hand it to the fixer again.",
         short_version(&group.version),
         advisories(group.vuln_ids().len())
     ))
@@ -211,7 +211,7 @@ pub fn render_reappeared(group: &FindingGroup) -> String {
         None => "no fix released".to_string(),
     };
     limit(&format!(
-        "**Reappeared:** {} {} is reported again ({}, {fix}). Reply `{MENTION} approve` to hand it to the fixer.",
+        "**Reappeared:** {} {} is reported again ({}, {fix}). Reply {MENTION} `approve` to hand it to the fixer.",
         group.package,
         short_version(&group.version),
         advisories(group.vuln_ids().len())
@@ -679,7 +679,7 @@ mod tests {
         assert_eq!(
             render_reopened(&axios()),
             "**Reopened:** installed 0.21.1 still has 2 advisories (fix 1.18.0). \
-             Reply `@baba_yaga approve` to hand it to the fixer again."
+             Reply @baba_yaga `approve` to hand it to the fixer again."
         );
         let next = chrono::TimeZone::with_ymd_and_hms(&Utc, 2026, 11, 7, 6, 0, 0).unwrap();
         assert_eq!(

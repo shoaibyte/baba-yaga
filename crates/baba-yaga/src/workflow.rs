@@ -1246,7 +1246,7 @@ mod tests {
             poster.replies.borrow().as_slice(),
             &[(
                 "sw_lodash".to_string(),
-                "**Reopened:** installed 4.18.0 still has 1 advisory (fix 4.18.1). Reply `@baba_yaga approve` to hand it to the fixer again."
+                "**Reopened:** installed 4.18.0 still has 1 advisory (fix 4.18.1). Reply @baba_yaga `approve` to hand it to the fixer again."
                     .to_string()
             )]
         );
@@ -1315,7 +1315,7 @@ mod tests {
             &[(
                 "sw_lodash".to_string(),
                 "**Reappeared:** lodash 4.18.0 is reported again (1 advisory, fix 4.18.1). \
-                 Reply `@baba_yaga approve` to hand it to the fixer."
+                 Reply @baba_yaga `approve` to hand it to the fixer."
                     .to_string()
             )]
         );
