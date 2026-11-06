@@ -298,18 +298,18 @@ pub(crate) async fn hand_off<C: FixerChannel>(
     thread_id: &str,
     who: &str,
 ) -> Result<String> {
-    let body = format::render_handoff(fixer, &g.group, repo_path);
+    let body = format::render_handoff(&g.group, repo_path);
     match channel.send_to(fixer, thread_id, &body).await {
         Ok(()) => {
             state.set_status(&g.key, Status::Assigned)?;
             tracing::info!(key = %g.key, %fixer, %thread_id, "handed to the fixer");
-            Ok(format!("Approved by {who}. Handed to @{fixer}."))
+            Ok(format!("Approved by {who}. Handed to {fixer}."))
         }
         Err(e) => {
             let e = format!("{e:#}");
             tracing::error!(key = %g.key, %fixer, error = %e, "handoff failed");
             Ok(format!(
-                "Approved by {who}, but the handoff to @{fixer} failed: {e}. The finding stays approved."
+                "Approved by {who}, but the handoff to {fixer} failed: {e}. The finding stays approved."
             ))
         }
     }
@@ -857,14 +857,12 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(reply, "Approved by alice. Handed to @patrol-fixer.");
+        assert_eq!(reply, "Approved by alice. Handed to patrol-fixer.");
         let sent = fixer.sent.borrow();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, "patrol-fixer");
         assert_eq!(sent[0].1, "sw_reply");
-        assert!(sent[0]
-            .2
-            .starts_with("@patrol-fixer please fix: repo /w/samples, "));
+        assert!(sent[0].2.starts_with("Please fix: repo /w/samples, "));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Assigned);
 
         // Someone else talking in the thread changes nothing.
@@ -929,7 +927,7 @@ mod tests {
         let reply = hand_off(&state, &fixer, "patrol-fixer", "/w", &g, "sw_root", "alice")
             .await
             .unwrap();
-        assert!(reply.contains("handoff to @patrol-fixer failed: 409: target not in room"));
+        assert!(reply.contains("handoff to patrol-fixer failed: 409: target not in room"));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
     }
 

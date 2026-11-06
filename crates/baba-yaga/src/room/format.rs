@@ -122,16 +122,17 @@ pub fn render_hint() -> String {
     format!("Commands here: {MENTION} approve, {MENTION} snooze 30d, {MENTION} status")
 }
 
-/// The task for the fixer agent, posted in the finding's thread. `repo_path`
-/// is the configured repo URL or local directory; the lockfile is the first
+/// The task for the fixer agent, posted in the finding's thread. No mention:
+/// `send_targeted_message` adds the target's own. `repo_path` is the
+/// configured repo URL or local directory; the lockfile is the first
 /// finding's manifest, relative to the repo root.
-pub fn render_handoff(fixer: &str, group: &FindingGroup, repo_path: &str) -> String {
+pub fn render_handoff(group: &FindingGroup, repo_path: &str) -> String {
     let lockfile = group
         .findings
         .first()
         .map_or("unknown", |f| f.source_path.as_str());
     format!(
-        "@{fixer} please fix: repo {repo_path}, ecosystem {}, package {}, current {}, fix {}, lockfile {lockfile}. Reply in this thread when the branch is pushed.",
+        "Please fix: repo {repo_path}, ecosystem {}, package {}, current {}, fix {}, lockfile {lockfile}. Reply in this thread when the branch is pushed.",
         group.ecosystem,
         group.package,
         group.version,
@@ -348,12 +349,11 @@ mod tests {
     fn handoff_text() {
         let g = group(vec![finding("GHSA-a", 7.5, "s")]).remove(0);
         assert_eq!(
-            render_handoff("patrol-fixer", &g, "/work/samples"),
-            "@patrol-fixer please fix: repo /work/samples, ecosystem npm, package axios, \
+            render_handoff(&g, "/work/samples"),
+            "Please fix: repo /work/samples, ecosystem npm, package axios, \
              current 0.21.1, fix 1.18.0, lockfile node/package-lock.json. \
              Reply in this thread when the branch is pushed."
         );
-        assert!(render_handoff("other-bot", &g, "x").starts_with("@other-bot please fix:"));
     }
 
     #[test]
