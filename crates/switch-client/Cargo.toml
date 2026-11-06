@@ -2,6 +2,7 @@
 name = "switch-client"
 version.workspace = true
 edition.workspace = true
+license = "MIT"
 
 [dependencies]
 tokio.workspace = true

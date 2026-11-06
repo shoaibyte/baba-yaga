@@ -183,4 +183,4 @@ Other docs:
 
 ## License
 
-MIT.
+MIT. See LICENSE.
