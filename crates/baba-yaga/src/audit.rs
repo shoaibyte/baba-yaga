@@ -109,6 +109,14 @@ pub fn line(now: DateTime<Utc>, key: &str, action: &str, who: &str) -> String {
     )
 }
 
+/// `<ISO time> <key> <event>`, for what Baba-Yaga did on its own.
+pub fn event_line(now: DateTime<Utc>, key: &str, event: &str) -> String {
+    format!(
+        "{} {key} {event}",
+        now.to_rfc3339_opts(SecondsFormat::Secs, true)
+    )
+}
+
 /// The newest whole lines of `text` that fit in `max` bytes.
 pub fn tail_lines(text: &str, max: usize) -> &str {
     if text.len() <= max {

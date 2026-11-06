@@ -122,6 +122,11 @@ pub fn render_hint() -> String {
     format!("Commands here: {MENTION} approve, {MENTION} snooze 30d, {MENTION} status")
 }
 
+/// The thread reply for a group the scanner stopped reporting.
+pub fn render_gone(package: &str) -> String {
+    format!("Resolved: {package} is no longer reported by the scanner.")
+}
+
 /// The task for the fixer agent, posted in the finding's thread. No mention:
 /// `send_targeted_message` adds the target's own. `repo_path` is the
 /// configured repo URL or local directory; the lockfile is the first

@@ -135,7 +135,10 @@ pub struct Summary {
     pub snoozed: usize,
     pub resolved: usize,
     pub rejected: usize,
-    pub failed_repos: usize,
+    /// Groups resolved in this run because the scan no longer reports them.
+    pub gone: usize,
+    /// Names of the repos whose scan failed.
+    pub failed_repos: Vec<String>,
 }
 
 impl std::fmt::Display for Summary {
@@ -152,8 +155,11 @@ impl std::fmt::Display for Summary {
             self.resolved,
             self.rejected
         )?;
-        if self.failed_repos > 0 {
-            write!(f, ", {} repos failed to scan", self.failed_repos)?;
+        if self.gone > 0 {
+            write!(f, ", {} no longer reported", self.gone)?;
+        }
+        if !self.failed_repos.is_empty() {
+            write!(f, ", {} repos failed to scan", self.failed_repos.len())?;
         }
         Ok(())
     }
@@ -174,7 +180,7 @@ pub async fn scan_groups(
             Ok(f) => findings.extend(f),
             Err(e) => {
                 tracing::error!(repo = %repo.name, error = %format!("{e:#}"), "scan failed");
-                summary.failed_repos += 1;
+                summary.failed_repos.push(repo.name.clone());
             }
         }
     }
@@ -261,6 +267,49 @@ pub(crate) async fn publish<P: RoomPoster>(
         }
     }
     Ok(())
+}
+
+/// Resolve every group in `scanned` repos that state holds as open,
+/// approved, assigned or pr_open but that `groups` (this scan) no longer
+/// contains, and say so in its thread. Repos that were not scanned, or whose
+/// scan failed, are left alone, as are snoozed and rejected groups. Returns
+/// the resolved keys.
+pub(crate) async fn resolve_gone<P: RoomPoster>(
+    state: &State,
+    poster: &P,
+    scanned: &[String],
+    groups: &[FindingGroup],
+    summary: &mut Summary,
+) -> Result<Vec<String>> {
+    let present: std::collections::HashSet<String> = groups.iter().map(FindingGroup::key).collect();
+    let mut gone = Vec::new();
+    for status in [
+        Status::Open,
+        Status::Approved,
+        Status::Assigned,
+        Status::PrOpen,
+    ] {
+        for g in state.list_status(status)? {
+            if present.contains(&g.key) || !scanned.contains(&g.group.repo) {
+                continue;
+            }
+            state.set_status(&g.key, Status::Resolved)?;
+            tracing::info!(key = %g.key, was = status.as_str(), "resolved: no longer reported");
+            if let Some(thread_id) = &g.thread_id {
+                // The state change stands even if the reply fails.
+                if let Err(e) = poster
+                    .reply(thread_id, &format::render_gone(&g.group.package))
+                    .await
+                {
+                    tracing::warn!(key = %g.key, error = %format!("{e:#}"), "resolved reply not posted");
+                }
+                tokio::time::sleep(POST_GAP).await;
+            }
+            gone.push(g.key);
+        }
+    }
+    summary.gone += gone.len();
+    Ok(gone)
 }
 
 /// The command hint as the thread's first reply, so the thread exists for
@@ -503,6 +552,23 @@ impl Agent<'_> {
             &mut summary,
         )
         .await?;
+        let scanned: Vec<String> = repos
+            .iter()
+            .map(|r| r.name.clone())
+            .filter(|n| !summary.failed_repos.contains(n))
+            .collect();
+        let gone = resolve_gone(
+            &self.state,
+            &Live(&self.client),
+            &scanned,
+            &groups,
+            &mut summary,
+        )
+        .await?;
+        for key in gone {
+            let line = audit::event_line(Utc::now(), &key, "resolved (no longer reported)");
+            self.audit.append(&self.client, &self.state, &line).await?;
+        }
         Ok(summary)
     }
 
@@ -749,8 +815,8 @@ pub async fn report(opts: ReportOptions) -> Result<()> {
         }
     }
     tracing::info!(%summary, "report finished");
-    if summary.failed_repos > 0 {
-        bail!("{} repos failed to scan", summary.failed_repos);
+    if !summary.failed_repos.is_empty() {
+        bail!("{} repos failed to scan", summary.failed_repos.len());
     }
     Ok(())
 }
@@ -941,6 +1007,85 @@ mod tests {
             .unwrap();
         assert!(reply.contains("handoff to patrol-fixer failed: 409: target not in room"));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
+    }
+
+    #[tokio::test]
+    async fn groups_that_disappear_are_resolved() {
+        let state = State::open_in_memory().unwrap();
+        let mk = |repo: &str, package: &str| {
+            let mut f = finding(package, "GHSA-1");
+            f.repo = repo.into();
+            scanner::group(vec![f]).remove(0)
+        };
+        let still = mk("samples", "axios");
+        let rows = [
+            (mk("samples", "lodash"), Status::PrOpen, Some("sw_lodash")),
+            (mk("samples", "minimist"), Status::Approved, None),
+            (mk("samples", "jinja2"), Status::Snoozed, Some("sw_jinja2")),
+            (
+                mk("samples", "urllib3"),
+                Status::Rejected,
+                Some("sw_urllib3"),
+            ),
+            (mk("other", "requests"), Status::Open, Some("sw_requests")),
+            (still.clone(), Status::Assigned, Some("sw_axios")),
+        ];
+        for (g, status, thread) in &rows {
+            state.record(g, t0()).unwrap();
+            if let Some(t) = thread {
+                state.set_thread(&g.key(), t, t0()).unwrap();
+            }
+            match status {
+                Status::Snoozed => state
+                    .snooze(&g.key(), t0() + chrono::Duration::days(30))
+                    .unwrap(),
+                s => state.set_status(&g.key(), *s).unwrap(),
+            }
+        }
+
+        let poster = Recorder::default();
+        let mut summary = Summary::default();
+        // Only "samples" was scanned, and it now reports axios alone.
+        let gone = resolve_gone(
+            &state,
+            &poster,
+            &["samples".to_string()],
+            &[still],
+            &mut summary,
+        )
+        .await
+        .unwrap();
+
+        let mut gone_sorted = gone.clone();
+        gone_sorted.sort();
+        assert_eq!(
+            gone_sorted,
+            vec!["samples:npm:lodash", "samples:npm:minimist"]
+        );
+        assert_eq!(summary.gone, 2);
+        let status = |k: &str| state.get(k).unwrap().unwrap().status;
+        assert_eq!(status("samples:npm:lodash"), Status::Resolved);
+        assert_eq!(status("samples:npm:minimist"), Status::Resolved);
+        assert_eq!(status("samples:npm:jinja2"), Status::Snoozed);
+        assert_eq!(status("samples:npm:urllib3"), Status::Rejected);
+        assert_eq!(
+            status("other:npm:requests"),
+            Status::Open,
+            "repo not scanned"
+        );
+        assert_eq!(
+            status("samples:npm:axios"),
+            Status::Assigned,
+            "still reported"
+        );
+        // One reply, in the thread of the group that had one.
+        assert_eq!(
+            *poster.replies.borrow(),
+            vec![(
+                "sw_lodash".to_string(),
+                "Resolved: lodash is no longer reported by the scanner.".to_string()
+            )]
+        );
     }
 
     #[test]
