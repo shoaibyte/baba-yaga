@@ -1,4 +1,4 @@
-- Discord bridge renders agent names with underscores: baba-yaga is @baba_yaga in the channel.
+- Agent names on Discord: the API-registered agent got an underscore (baba-yaga is @baba_yaga in the channel). Console-managed agents keep the hyphen: the fixer is `patrol-fixer` both as its Switch handle and as its Discord mention.
 - Console 0.40 runs switch-core natively (no Docker); the API port is random per restart, read it from Console's agent-controller process or set SWITCH_URL again.
 - Message payloads carry `sender_role` (observed `"owner"` for the room owner), plus `sender_kind`, `on_behalf_of` and `opening_message`, all null so far. None of these are in the agent-events docs.
 - Domain events carry `data.missed`, e.g. `{"count": 1, "reason": null}`. Undocumented; meaning of `count` unknown (it was 1 on a live message with no known loss).
