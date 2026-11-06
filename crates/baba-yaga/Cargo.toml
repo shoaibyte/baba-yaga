@@ -3,6 +3,20 @@ name = "baba-yaga"
 version.workspace = true
 edition.workspace = true
 license = "MIT"
+description = "Dependency vulnerability patrol for Switch rooms"
+default-run = "baba-yaga"
+
+[lib]
+name = "baba_yaga"
+path = "src/lib.rs"
+
+[[bin]]
+name = "baba-yaga"
+path = "src/main.rs"
+
+[[bin]]
+name = "bay"
+path = "src/bin/bay.rs"
 
 [dependencies]
 switch-client.workspace = true
