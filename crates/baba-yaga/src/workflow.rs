@@ -336,31 +336,53 @@ pub(crate) fn pr_link(body: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// What a fixer message did to state.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FixerReply {
+    /// Not from the fixer, not in a thread, or not in an assigned group's thread.
+    Ignored,
+    /// In an assigned group's thread but with no link or `fix/` branch, such
+    /// as an acknowledgement. The group stays assigned.
+    NoLink { key: String },
+    /// The group moved to `pr_open` with this link.
+    PrOpen { key: String, link: String },
+}
+
 /// A message from the fixer in the thread of an assigned group moves the
-/// group to `pr_open`, with the link from the message. Returns the group key
-/// and the link when it did.
+/// group to `pr_open`, but only when it carries evidence: an http link or a
+/// `fix/` branch name. The fixer acknowledges a handoff at once, before it
+/// has done anything, so its first message alone proves nothing.
 pub(crate) fn track_fixer_reply(
     state: &State,
     fixer: &str,
     sender_name: Option<&str>,
     thread_id: Option<&str>,
     body: &str,
-) -> Result<Option<(String, Option<String>)>> {
+) -> Result<FixerReply> {
     let (Some(name), Some(thread)) = (sender_name, thread_id) else {
-        return Ok(None);
+        return Ok(FixerReply::Ignored);
     };
     if !is_fixer(name, fixer) {
-        return Ok(None);
+        return Ok(FixerReply::Ignored);
     }
     let Some(g) = state.find_by_thread(thread)? else {
-        return Ok(None);
+        return Ok(FixerReply::Ignored);
     };
     if g.status != Status::Assigned {
-        return Ok(None);
+        return Ok(FixerReply::Ignored);
     }
-    let link = pr_link(body);
-    state.set_pr_open(&g.key, link.as_deref())?;
-    Ok(Some((g.key, link)))
+    match pr_link(body) {
+        Some(link) => {
+            state.set_pr_open(&g.key, Some(&link))?;
+            Ok(FixerReply::PrOpen { key: g.key, link })
+        }
+        None => Ok(FixerReply::NoLink { key: g.key }),
+    }
+}
+
+/// The first `n` characters of `s`, for logs.
+pub(crate) fn head(s: &str, n: usize) -> String {
+    s.chars().take(n).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -489,17 +511,27 @@ impl Agent<'_> {
         // agent that listens to everything invites a loop.
         if let Some(fixer) = &self.cfg.fixer_agent {
             if m.sender_name.as_deref().is_some_and(|n| is_fixer(n, fixer)) {
-                if let Some((key, link)) = track_fixer_reply(
+                match track_fixer_reply(
                     &self.state,
                     fixer,
                     m.sender_name.as_deref(),
                     m.thread_id.as_deref(),
                     &m.body,
                 )? {
-                    tracing::info!(%key, pr_url = ?link, "fixer replied");
-                    self.record(&key, "fixer replied", fixer).await?;
-                } else {
-                    tracing::debug!(seq = ev.id, thread_id = ?m.thread_id, "fixer message ignored");
+                    FixerReply::PrOpen { key, link } => {
+                        tracing::info!(%key, pr_url = %link, "fixer replied");
+                        self.record(&key, "fixer replied", fixer).await?;
+                    }
+                    FixerReply::NoLink { key } => {
+                        tracing::info!(
+                            %key,
+                            body = %head(&m.body, 200),
+                            "fixer message without a link; group stays assigned"
+                        );
+                    }
+                    FixerReply::Ignored => {
+                        tracing::debug!(seq = ev.id, thread_id = ?m.thread_id, "fixer message ignored");
+                    }
                 }
                 return Ok(());
             }
@@ -843,7 +875,19 @@ mod tests {
             Some("sw_root"),
             "fix/x",
         );
-        assert_eq!(other.unwrap(), None);
+        assert_eq!(other.unwrap(), FixerReply::Ignored);
+
+        // An acknowledgement without a link leaves it assigned.
+        let ack = track_fixer_reply(
+            &state,
+            "patrol-fixer",
+            Some("patrol-fixer"),
+            Some("sw_root"),
+            "On it, starting now.",
+        )
+        .unwrap();
+        assert_eq!(ack, FixerReply::NoLink { key: g.key.clone() });
+        assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Assigned);
 
         let moved = track_fixer_reply(
             &state,
@@ -855,7 +899,10 @@ mod tests {
         .unwrap();
         assert_eq!(
             moved,
-            Some((g.key.clone(), Some("fix/lodash-4.17.21".to_string())))
+            FixerReply::PrOpen {
+                key: g.key.clone(),
+                link: "fix/lodash-4.17.21".to_string()
+            }
         );
         let row = state.get(&g.key).unwrap().unwrap();
         assert_eq!(row.status, Status::PrOpen);
@@ -869,7 +916,7 @@ mod tests {
             Some("sw_root"),
             "https://x",
         );
-        assert_eq!(again.unwrap(), None);
+        assert_eq!(again.unwrap(), FixerReply::Ignored);
     }
 
     #[tokio::test]
