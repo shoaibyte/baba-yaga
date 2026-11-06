@@ -96,8 +96,12 @@ pub fn render_group(group: &FindingGroup, multi_repo: bool) -> String {
     } else {
         String::new()
     };
+    // Discord names the thread from this text with newlines removed and
+    // markdown shown as typed, so line 1 ends in " ·" to join line 2
+    // cleanly, and line 2 has no bold. The mention stays outside backticks
+    // so the bridge can turn it into a real mention.
     let text = format!(
-        "{}\n**{}** · {} · reachable: {}\n{repo}{} · {}\nReply here: `{MENTION} approve` · `snooze 30d` · `reject`",
+        "{} ·\n{} · {} · reachable: {}\n{repo}{} · {}\nReply here: {MENTION} `approve` · `snooze 30d` · `reject`",
         title(group),
         severity(group.max_severity),
         advisories(group.vuln_ids().len()),
@@ -452,11 +456,31 @@ mod tests {
     fn root_single_repo() {
         assert_eq!(
             render_group(&axios(), false),
-            "axios 0.21.1 → 1.18.0\n\
-             **HIGH 7.5** · 2 advisories · reachable: unknown\n\
+            "axios 0.21.1 → 1.18.0 ·\n\
+             HIGH 7.5 · 2 advisories · reachable: unknown\n\
              npm · `node/package-lock.json`\n\
-             Reply here: `@baba_yaga approve` · `snooze 30d` · `reject`"
+             Reply here: @baba_yaga `approve` · `snooze 30d` · `reject`"
         );
+    }
+
+    #[test]
+    fn root_joins_into_a_clean_thread_title() {
+        let mut f = finding("GHSA-xvch-5gv4-984h", Some(9.8), "Prototype Pollution");
+        f.package = "minimist".into();
+        f.version = "1.2.5".into();
+        f.fixed_version = Some("1.2.6".into());
+        let g = group(vec![f]).remove(0);
+        let text = render_group(&g, false);
+        let lines: Vec<&str> = text.lines().collect();
+        // Discord drops the newline: the first two lines become the title.
+        assert_eq!(
+            format!("{} {}", lines[0], lines[1]),
+            "minimist 1.2.5 → 1.2.6 · CRITICAL 9.8 · 1 advisory · reachable: unknown"
+        );
+        assert!(!lines[1].contains('*'));
+        // No mention inside backticks anywhere in the root.
+        assert!(!text.contains("`@"));
+        assert!(lines[3].starts_with("Reply here: @baba_yaga `approve`"));
     }
 
     #[test]
@@ -466,10 +490,10 @@ mod tests {
         let g = group(vec![f]).remove(0);
         assert_eq!(
             render_group(&g, true),
-            "axios 0.21.1 → 1.18.0\n\
-             **CRITICAL 9.8** · 1 advisory · reachable: yes\n\
+            "axios 0.21.1 → 1.18.0 ·\n\
+             CRITICAL 9.8 · 1 advisory · reachable: yes\n\
              samples · npm · `node/package-lock.json`\n\
-             Reply here: `@baba_yaga approve` · `snooze 30d` · `reject`"
+             Reply here: @baba_yaga `approve` · `snooze 30d` · `reject`"
         );
     }
 
@@ -480,8 +504,8 @@ mod tests {
         let g = group(vec![f]).remove(0);
         let text = render_group(&g, false);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines[0], "axios 0.21.1, no fix released");
-        assert_eq!(lines[1], "**UNSCORED** · 1 advisory · reachable: unknown");
+        assert_eq!(lines[0], "axios 0.21.1, no fix released ·");
+        assert_eq!(lines[1], "UNSCORED · 1 advisory · reachable: unknown");
     }
 
     #[test]
@@ -496,10 +520,10 @@ mod tests {
         let g = group(vec![f]).remove(0);
         assert_eq!(
             render_group(&g, false),
-            "golang.org/x/net 0.0.0-20190620200207… → 0.7.0\n\
-             **HIGH 7.5** · 1 advisory · reachable: no\n\
+            "golang.org/x/net 0.0.0-20190620200207… → 0.7.0 ·\n\
+             HIGH 7.5 · 1 advisory · reachable: no\n\
              Go · `go/go.mod`\n\
-             Reply here: `@baba_yaga approve` · `snooze 30d` · `reject`"
+             Reply here: @baba_yaga `approve` · `snooze 30d` · `reject`"
         );
         assert_eq!(short_version("1.2.3"), "1.2.3");
         assert_eq!(short_version(&"9".repeat(24)), "9".repeat(24));
