@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::scanner::finding::FindingGroup;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 
 /// Version 2. Version 1 had one row per advisory (`findings`). This is
 /// pre-release, so the migration drops v1 rather than converting it.
@@ -43,6 +43,11 @@ const MIGRATE_V3: &str = "ALTER TABLE groups ADD COLUMN hint_posted INTEGER NOT 
 
 /// Version 4: the branch or pull request link the fixer replied with.
 const MIGRATE_V4: &str = "ALTER TABLE groups ADD COLUMN pr_url TEXT;";
+
+/// Version 5: the first thread reply is now the advisory details instead of
+/// the command hint. `hint_posted` now means "details posted"; clearing it
+/// makes the next scan post the details once in every existing thread.
+const MIGRATE_V5: &str = "UPDATE groups SET hint_posted = 0;";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -108,8 +113,8 @@ pub struct GroupState {
     pub first_seen: DateTime<Utc>,
     pub last_seen: DateTime<Utc>,
     pub last_posted: Option<DateTime<Utc>>,
-    /// The command hint was posted in the thread. Posting it is what makes
-    /// the thread exist on Discord.
+    /// The first thread reply (now the advisory details) was posted.
+    /// Posting it is what makes the thread exist on Discord.
     pub hint_posted: bool,
     /// What the fixer replied with: a pull request URL or a `fix/` branch.
     pub pr_url: Option<String>,
@@ -153,6 +158,9 @@ impl State {
             }
             if version < 4 {
                 tx.execute_batch(MIGRATE_V4)?;
+            }
+            if version < 5 {
+                tx.execute_batch(MIGRATE_V5)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;

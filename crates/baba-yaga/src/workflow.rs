@@ -128,7 +128,7 @@ impl RoomPoster for DryRun {
 pub struct Summary {
     pub groups: usize,
     pub new_threads: usize,
-    /// Command hints posted in threads, new or older ones without a hint.
+    /// Details replies posted in threads, new or older ones without one.
     pub hints: usize,
     pub updates: usize,
     pub unchanged: usize,
@@ -144,28 +144,28 @@ pub struct Summary {
     pub failed_repos: Vec<String>,
 }
 
+/// `12 packages · 3 new · 1 updated`: the package count always, then each
+/// part that is not zero.
 impl std::fmt::Display for Summary {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{} packages with findings: {} new threads, {} hints, {} updates, {} unchanged, {} snoozed, {} resolved, {} rejected",
-            self.groups,
-            self.new_threads,
-            self.hints,
-            self.updates,
-            self.unchanged,
-            self.snoozed,
-            self.resolved,
-            self.rejected
-        )?;
-        if self.gone > 0 {
-            write!(f, ", {} no longer reported", self.gone)?;
-        }
-        if self.reopened > 0 {
-            write!(f, ", {} reopened after a version change", self.reopened)?;
+        write!(f, "{}", format::count(self.groups, "package", "packages"))?;
+        for (n, what) in [
+            (self.new_threads, "new"),
+            (self.updates, "updated"),
+            (self.gone, "resolved"),
+            (self.reopened, "reopened"),
+            (self.snoozed, "snoozed"),
+        ] {
+            if n > 0 {
+                write!(f, " · {n} {what}")?;
+            }
         }
         if !self.failed_repos.is_empty() {
-            write!(f, ", {} repos failed to scan", self.failed_repos.len())?;
+            write!(
+                f,
+                " · {} failed to scan",
+                format::count(self.failed_repos.len(), "repo", "repos")
+            )?;
         }
         Ok(())
     }
@@ -197,15 +197,16 @@ pub async fn scan_groups(
 }
 
 /// Post every group that needs it and record it in `state` (if any):
-/// a new group gets a root message and the command hint as its first reply,
-/// a changed group gets a one-line update in its thread, snoozed and
-/// resolved and rejected groups are skipped. A thread from before hints existed gets its
-/// hint once; the root is never posted again.
+/// a new group gets a root message and the advisory details as its first
+/// reply, a changed group gets a one-line update in its thread, snoozed and
+/// resolved and rejected groups are skipped. A thread without the details
+/// reply gets it once; the root is never posted again.
 pub(crate) async fn publish<P: RoomPoster>(
     groups: &[FindingGroup],
     state: Option<&State>,
     poster: &P,
     now: DateTime<Utc>,
+    multi_repo: bool,
     summary: &mut Summary,
 ) -> Result<()> {
     let state = state.filter(|_| poster.writes_state());
@@ -240,7 +241,7 @@ pub(crate) async fn publish<P: RoomPoster>(
             .and_then(|e| e.thread_id.clone().map(|t| (e, t)))
         {
             None => {
-                let id = poster.post(&format::render_group(g)).await?;
+                let id = poster.post(&format::render_group(g, multi_repo)).await?;
                 if let Some(s) = state {
                     s.record(g, now)?;
                     s.set_thread(&key, &id, now)?;
@@ -248,11 +249,11 @@ pub(crate) async fn publish<P: RoomPoster>(
                 tracing::info!(%key, thread_id = %id, "thread opened");
                 summary.new_threads += 1;
                 tokio::time::sleep(POST_GAP).await;
-                post_hint(poster, state, &key, &id, summary).await?;
+                post_details(poster, state, g, &id, summary).await?;
             }
             Some((ex, thread_id)) => {
                 if !ex.hint_posted {
-                    post_hint(poster, state, &key, &thread_id, summary).await?;
+                    post_details(poster, state, g, &thread_id, summary).await?;
                 }
                 if change == Change::Changed {
                     poster
@@ -366,20 +367,22 @@ pub(crate) async fn reopen_changed<P: RoomPoster>(
     Ok(reopened)
 }
 
-/// The command hint as the thread's first reply, so the thread exists for
-/// people to answer in.
-async fn post_hint<P: RoomPoster>(
+/// The advisory details as the thread's first reply, which also makes the
+/// thread visible for people to answer in. `hint_posted` records that it
+/// was sent.
+async fn post_details<P: RoomPoster>(
     poster: &P,
     state: Option<&State>,
-    key: &str,
+    g: &FindingGroup,
     thread_id: &str,
     summary: &mut Summary,
 ) -> Result<()> {
-    poster.reply(thread_id, &format::render_hint()).await?;
+    let key = g.key();
+    poster.reply(thread_id, &format::render_details(g)).await?;
     if let Some(s) = state {
-        s.set_hint_posted(key)?;
+        s.set_hint_posted(&key)?;
     }
-    tracing::info!(%key, %thread_id, "hint posted in thread");
+    tracing::info!(%key, %thread_id, "details posted in thread");
     summary.hints += 1;
     tokio::time::sleep(POST_GAP).await;
     Ok(())
@@ -533,10 +536,9 @@ pub async fn serve(cfg: &Config) -> Result<()> {
 
     agent
         .client
-        .post(&format!(
-            "Baba-Yaga online. Watching {}. Next scan: {}.",
-            format::count(cfg.repos.len(), "repo", "repos"),
-            fmt_time(next_tick(&schedule)?)
+        .post(&format::render_online(
+            cfg.repos.len(),
+            next_tick(&schedule)?,
         ))
         .await?;
     agent.scan_and_post(None).await;
@@ -615,6 +617,7 @@ impl Agent<'_> {
             Some(&self.state),
             &Live(&self.client),
             now,
+            self.cfg.repos.len() > 1,
             &mut summary,
         )
         .await?;
@@ -764,13 +767,14 @@ impl Agent<'_> {
             Command::Status => format::render_status(
                 &self.state.list_open(Utc::now())?,
                 &self.state.list_status(Status::Rejected)?,
+                self.cfg.repos.len() > 1,
             ),
             Command::Scan { repo } => match self.configured_repo(repo.as_deref()) {
                 Err(reply) => reply,
                 Ok(only) => {
                     self.reply(thread, "Scanning now.").await?;
                     match self.scan_and_post(only.as_deref()).await {
-                        Some(summary) => format!("Scan done: {summary}."),
+                        Some(summary) => format!("Scan done: {summary}"),
                         None => "Scan failed; see the agent log.".to_string(),
                     }
                 }
@@ -866,7 +870,7 @@ pub struct ReportOptions {
 }
 
 /// Scan once, post, then exit. Posting opens a socket for as long as it
-/// takes, because the hint in each new thread is a thread reply and those
+/// takes, because the details reply in each new thread is a thread reply and those
 /// need a live connection. With state, groups already posted are skipped.
 pub async fn report(opts: ReportOptions) -> Result<()> {
     let state = opts.state_path.as_deref().map(State::open).transpose()?;
@@ -881,6 +885,7 @@ pub async fn report(opts: ReportOptions) -> Result<()> {
         s.reopen_expired(now)?;
     }
     let mut summary = Summary::default();
+    let multi_repo = opts.repos.len() > 1;
     let groups = scan_groups(
         &opts.repos,
         opts.min_severity,
@@ -889,7 +894,17 @@ pub async fn report(opts: ReportOptions) -> Result<()> {
     )
     .await?;
     match env {
-        None => publish(&groups, state.as_ref(), &DryRun, now, &mut summary).await?,
+        None => {
+            publish(
+                &groups,
+                state.as_ref(),
+                &DryRun,
+                now,
+                multi_repo,
+                &mut summary,
+            )
+            .await?
+        }
         Some(env) => {
             let (client, mut events) =
                 Client::connect(env.url, env.agent_id, env.agent_key, env.room_id).await?;
@@ -901,7 +916,15 @@ pub async fn report(opts: ReportOptions) -> Result<()> {
                     .wait_connected(Duration::from_secs(15))
                     .await
                     .context("could not connect to Switch")?;
-                publish(&groups, state.as_ref(), &Live(&client), now, &mut summary).await
+                publish(
+                    &groups,
+                    state.as_ref(),
+                    &Live(&client),
+                    now,
+                    multi_repo,
+                    &mut summary,
+                )
+                .await
             }
             .await;
             client.shutdown().await?;
@@ -956,7 +979,7 @@ mod tests {
         ]);
         let now = Utc.with_ymd_and_hms(2026, 11, 4, 12, 0, 0).unwrap();
         let mut summary = Summary::default();
-        publish(&groups, Some(&state), &DryRun, now, &mut summary)
+        publish(&groups, Some(&state), &DryRun, now, false, &mut summary)
             .await
             .unwrap();
         assert_eq!(summary.new_threads, 2);
@@ -1164,7 +1187,7 @@ mod tests {
             poster.replies.borrow().as_slice(),
             &[(
                 "sw_lodash".to_string(),
-                "Installed 4.18.0 still has 1 advisory (fix 4.18.1). Reply approve to hand it to the fixer again."
+                "**Reopened:** installed 4.18.0 still has 1 advisory (fix 4.18.1). Reply `@baba_yaga approve` to hand it to the fixer again."
                     .to_string()
             )]
         );
@@ -1174,7 +1197,7 @@ mod tests {
 
         // publish then posts no second message for lodash, only minimist's
         // update.
-        publish(&scan, Some(&state), &poster, t0(), &mut summary)
+        publish(&scan, Some(&state), &poster, t0(), false, &mut summary)
             .await
             .unwrap();
         let replies = poster.replies.borrow();
@@ -1269,7 +1292,7 @@ mod tests {
             *poster.replies.borrow(),
             vec![(
                 "sw_lodash".to_string(),
-                "Resolved: lodash is no longer reported by the scanner.".to_string()
+                "**Resolved:** lodash is no longer reported.".to_string()
             )]
         );
     }
@@ -1307,18 +1330,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn new_group_gets_root_then_hint_in_its_thread() {
+    async fn new_group_gets_root_then_details_in_its_thread() {
         let state = State::open_in_memory().unwrap();
         let groups = scanner::group(vec![finding("lodash", "GHSA-1")]);
         let poster = Recorder::default();
         let mut summary = Summary::default();
-        publish(&groups, Some(&state), &poster, t0(), &mut summary)
+        publish(&groups, Some(&state), &poster, t0(), false, &mut summary)
             .await
             .unwrap();
         assert_eq!(poster.posts.borrow().len(), 1);
         assert_eq!(
             *poster.replies.borrow(),
-            vec![("root-1".to_string(), format::render_hint())]
+            vec![("root-1".to_string(), format::render_details(&groups[0]))]
         );
         let row = state.get(&groups[0].key()).unwrap().unwrap();
         assert_eq!(row.thread_id.as_deref(), Some("root-1"));
@@ -1327,11 +1350,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn old_thread_without_hint_gets_exactly_one() {
+    async fn old_thread_without_details_gets_exactly_one() {
         let state = State::open_in_memory().unwrap();
         let groups = scanner::group(vec![finding("lodash", "GHSA-1")]);
         let key = groups[0].key();
-        // As serve left it before hints: posted root, no hint.
+        // A thread whose first reply was never posted.
         state.record(&groups[0], t0()).unwrap();
         state.set_thread(&key, "sw_root", t0()).unwrap();
         assert!(!state.get(&key).unwrap().unwrap().hint_posted);
@@ -1339,14 +1362,14 @@ mod tests {
         let poster = Recorder::default();
         for _ in 0..2 {
             let mut summary = Summary::default();
-            publish(&groups, Some(&state), &poster, t0(), &mut summary)
+            publish(&groups, Some(&state), &poster, t0(), false, &mut summary)
                 .await
                 .unwrap();
         }
         assert!(poster.posts.borrow().is_empty(), "root is not reposted");
         assert_eq!(
             *poster.replies.borrow(),
-            vec![("sw_root".to_string(), format::render_hint())]
+            vec![("sw_root".to_string(), format::render_details(&groups[0]))]
         );
         assert!(state.get(&key).unwrap().unwrap().hint_posted);
     }

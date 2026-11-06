@@ -134,7 +134,7 @@ From a clean clone, on macOS or Linux.
    RUST_LOG=info cargo run -p baba-yaga -- serve
    ```
 
-9. What you should see: the log says `connected`, and the room gets "Baba-Yaga online. Watching 1 repo. Next scan: ...". After the first scan, every vulnerable package has its own thread, with a command hint as the first reply. In a thread, `@baba_yaga approve` gets "Approved by <your Discord name>. Handed to patrol-fixer.", and the fixer's message appears in the same thread. The first time the fixer pushes, Console may show a permission prompt for its `git push`; allow it there. Once the fixer replies with a branch or PR link, `@baba_yaga status` lists the package as `pr_open`.
+9. What you should see: the log says `connected`, and the room gets "Baba-Yaga online · watching 1 repo · next scan ...". After the first scan, every vulnerable package has its own thread, titled "<package> <version> → <fix>", with the advisory details as the first reply. In a thread, `@baba_yaga approve` gets "Approved by <your Discord name>. Handed to patrol-fixer.", and the fixer's message appears in the same thread. The first time the fixer pushes, Console may show a permission prompt for its `git push`; allow it there. Once the fixer replies with a branch or PR link, `@baba_yaga status` lists the package as "PR open".
 
 Changes to `baba-yaga.toml` take effect when `serve` is restarted.
 
