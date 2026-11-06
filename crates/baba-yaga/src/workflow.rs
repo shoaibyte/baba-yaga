@@ -380,6 +380,9 @@ pub(crate) fn track_fixer_reply(
     }
 }
 
+/// How much of a message body goes into the log.
+const LOG_BODY_CHARS: usize = 200;
+
 /// The first `n` characters of `s`, for logs.
 pub(crate) fn head(s: &str, n: usize) -> String {
     s.chars().take(n).collect()
@@ -511,6 +514,12 @@ impl Agent<'_> {
         // agent that listens to everything invites a loop.
         if let Some(fixer) = &self.cfg.fixer_agent {
             if m.sender_name.as_deref().is_some_and(|n| is_fixer(n, fixer)) {
+                tracing::info!(
+                    seq = ev.id,
+                    thread_id = ?m.thread_id,
+                    body = %head(&m.body, LOG_BODY_CHARS),
+                    "fixer message"
+                );
                 match track_fixer_reply(
                     &self.state,
                     fixer,
@@ -523,11 +532,7 @@ impl Agent<'_> {
                         self.record(&key, "fixer replied", fixer).await?;
                     }
                     FixerReply::NoLink { key } => {
-                        tracing::info!(
-                            %key,
-                            body = %head(&m.body, 200),
-                            "fixer message without a link; group stays assigned"
-                        );
+                        tracing::info!(%key, "fixer message without a link; group stays assigned");
                     }
                     FixerReply::Ignored => {
                         tracing::debug!(seq = ev.id, thread_id = ?m.thread_id, "fixer message ignored");
@@ -541,7 +546,14 @@ impl Agent<'_> {
         }
         let command = commands::parse(&m.body);
         let who = m.sender_name.clone().unwrap_or_else(|| m.sender.clone());
-        tracing::info!(seq = ev.id, %who, ?command, thread_id = ?m.thread_id, "command");
+        tracing::info!(
+            seq = ev.id,
+            %who,
+            ?command,
+            thread_id = ?m.thread_id,
+            body = %head(&m.body, LOG_BODY_CHARS),
+            "command"
+        );
         let thread = m.thread_id.as_deref();
         let group = match thread {
             Some(t) => self.state.find_by_thread(t)?,
@@ -929,6 +941,12 @@ mod tests {
             .unwrap();
         assert!(reply.contains("handoff to patrol-fixer failed: 409: target not in room"));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
+    }
+
+    #[test]
+    fn head_is_char_safe() {
+        assert_eq!(head("abc", 200), "abc");
+        assert_eq!(head("æøå-xyz", 3), "æøå");
     }
 
     #[test]
