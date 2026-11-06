@@ -16,7 +16,7 @@ use crate::config::{Config, Repo};
 use crate::room::commands::{self, Command};
 use crate::room::format;
 use crate::scanner::{self, finding::FindingGroup};
-use crate::state::{Change, State, Status};
+use crate::state::{Change, GroupState, State, Status};
 
 /// Pause between room posts, so a first scan with many groups does not
 /// trip the chat platform's rate limit.
@@ -79,6 +79,28 @@ impl RoomPoster for Live<'_> {
 
     async fn reply(&self, thread_id: &str, text: &str) -> Result<()> {
         self.0.post_in_thread(thread_id, text).await?;
+        Ok(())
+    }
+}
+
+/// How the handoff reaches the fixer. A trait so tests can fake the send.
+pub(crate) trait FixerChannel {
+    /// Send `text` to the agent named `target`, inside the thread that
+    /// `thread_id` (any message in it) belongs to.
+    async fn send_to(&self, target: &str, thread_id: &str, text: &str) -> Result<()>;
+}
+
+/// `send_targeted_message` takes `thread_id` (Stage 3 ops probe, see
+/// docs/PROGRESS.md), so the handoff is both targeted and in the thread.
+impl FixerChannel for Live<'_> {
+    async fn send_to(&self, target: &str, thread_id: &str, text: &str) -> Result<()> {
+        let _: Value = self
+            .0
+            .op(
+                "send_targeted_message",
+                json!({"body": text, "target_names": [target], "thread_id": thread_id}),
+            )
+            .await?;
         Ok(())
     }
 }
@@ -261,6 +283,87 @@ async fn post_hint<P: RoomPoster>(
 }
 
 // ---------------------------------------------------------------------------
+// Fixer handoff
+// ---------------------------------------------------------------------------
+
+/// Send an approved group to the fixer in its thread and mark it assigned.
+/// Returns the reply for the thread. A failed send is reported in that reply
+/// and leaves the group approved.
+pub(crate) async fn hand_off<C: FixerChannel>(
+    state: &State,
+    channel: &C,
+    fixer: &str,
+    repo_path: &str,
+    g: &GroupState,
+    thread_id: &str,
+    who: &str,
+) -> Result<String> {
+    let body = format::render_handoff(fixer, &g.group, repo_path);
+    match channel.send_to(fixer, thread_id, &body).await {
+        Ok(()) => {
+            state.set_status(&g.key, Status::Assigned)?;
+            tracing::info!(key = %g.key, %fixer, %thread_id, "handed to the fixer");
+            Ok(format!("Approved by {who}. Handed to @{fixer}."))
+        }
+        Err(e) => {
+            let e = format!("{e:#}");
+            tracing::error!(key = %g.key, %fixer, error = %e, "handoff failed");
+            Ok(format!(
+                "Approved by {who}, but the handoff to @{fixer} failed: {e}. The finding stays approved."
+            ))
+        }
+    }
+}
+
+/// Whether `sender_name` is the fixer: case-insensitive, and `_` equals `-`,
+/// since the Discord bridge may render either.
+pub(crate) fn is_fixer(sender_name: &str, fixer: &str) -> bool {
+    let norm = |s: &str| s.trim_start_matches('@').to_lowercase().replace('_', "-");
+    norm(sender_name) == norm(fixer)
+}
+
+/// The first token in `body` that starts with "http" or contains "fix/",
+/// without surrounding quotes, brackets or trailing punctuation.
+pub(crate) fn pr_link(body: &str) -> Option<String> {
+    body.split_whitespace()
+        .map(|t| {
+            let wrap = |c: char| matches!(c, '`' | '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']');
+            t.trim_start_matches(wrap).trim_end_matches(|c: char| {
+                wrap(c) || matches!(c, '.' | ',' | ';' | ':' | '!' | '?')
+            })
+        })
+        .find(|t| t.starts_with("http") || t.contains("fix/"))
+        .map(str::to_string)
+}
+
+/// A message from the fixer in the thread of an assigned group moves the
+/// group to `pr_open`, with the link from the message. Returns the group key
+/// and the link when it did.
+pub(crate) fn track_fixer_reply(
+    state: &State,
+    fixer: &str,
+    sender_name: Option<&str>,
+    thread_id: Option<&str>,
+    body: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    let (Some(name), Some(thread)) = (sender_name, thread_id) else {
+        return Ok(None);
+    };
+    if !is_fixer(name, fixer) {
+        return Ok(None);
+    }
+    let Some(g) = state.find_by_thread(thread)? else {
+        return Ok(None);
+    };
+    if g.status != Status::Assigned {
+        return Ok(None);
+    }
+    let link = pr_link(body);
+    state.set_pr_open(&g.key, link.as_deref())?;
+    Ok(Some((g.key, link)))
+}
+
+// ---------------------------------------------------------------------------
 // serve
 // ---------------------------------------------------------------------------
 
@@ -382,6 +485,25 @@ impl Agent<'_> {
         let Ok(EventPayload::Message(m)) = ev.data.typed_payload() else {
             return Ok(());
         };
+        // The fixer's messages are tracked, never answered: answering an
+        // agent that listens to everything invites a loop.
+        if let Some(fixer) = &self.cfg.fixer_agent {
+            if m.sender_name.as_deref().is_some_and(|n| is_fixer(n, fixer)) {
+                if let Some((key, link)) = track_fixer_reply(
+                    &self.state,
+                    fixer,
+                    m.sender_name.as_deref(),
+                    m.thread_id.as_deref(),
+                    &m.body,
+                )? {
+                    tracing::info!(%key, pr_url = ?link, "fixer replied");
+                    self.record(&key, "fixer replied", fixer).await?;
+                } else {
+                    tracing::debug!(seq = ev.id, thread_id = ?m.thread_id, "fixer message ignored");
+                }
+                return Ok(());
+            }
+        }
         if !m.addressed {
             return Ok(());
         }
@@ -408,17 +530,33 @@ impl Agent<'_> {
                     Command::Approve | Command::Reject if !self.may_decide(&m).await? => {
                         "Only a room member can approve or reject.".to_string()
                     }
+                    Command::Approve if matches!(g.status, Status::Assigned | Status::PrOpen) => {
+                        format!(
+                            "Already with the fixer (status {}); not sent again.",
+                            g.status.as_str()
+                        )
+                    }
                     Command::Approve => {
                         self.state.set_status(&g.key, Status::Approved)?;
                         self.record(&g.key, "approved", &who).await?;
-                        let mut text = format!("Approved by {who}, handing to the fixer.");
-                        match &self.cfg.fixer_agent {
-                            Some(fixer) => self.hand_to_fixer(fixer, &g.group, thread).await?,
-                            None => text.push_str(
-                                " No fixer agent is configured yet, so nothing was sent.",
+                        match (&self.cfg.fixer_agent, thread) {
+                            (Some(fixer), Some(t)) => {
+                                let repo_path = self.repo_path(&g.group.repo);
+                                hand_off(
+                                    &self.state,
+                                    &Live(&self.client),
+                                    fixer,
+                                    repo_path,
+                                    &g,
+                                    t,
+                                    &who,
+                                )
+                                .await?
+                            }
+                            _ => format!(
+                                "Approved by {who}, handing to the fixer. No fixer agent is configured yet, so nothing was sent."
                             ),
                         }
-                        text
                     }
                     Command::Reject => {
                         self.state.set_status(&g.key, Status::Rejected)?;
@@ -485,31 +623,13 @@ impl Agent<'_> {
             .any(|p| p.kind == "user" && p.name == name))
     }
 
-    // TODO(stage 5): the fixer protocol. For now one targeted message in the
-    // thread names the package and the fix version.
-    async fn hand_to_fixer(
-        &self,
-        fixer: &str,
-        group: &FindingGroup,
-        thread: Option<&str>,
-    ) -> Result<()> {
-        let body = format!(
-            "Please open a pull request upgrading {} in {} ({}) from {} to {}. Advisories: {}.",
-            group.package,
-            group.repo,
-            group.ecosystem,
-            group.version,
-            group.highest_fixed.as_deref().unwrap_or("a fixed version"),
-            group.vuln_ids().join(", ")
-        );
-        let _: Value = self
-            .client
-            .op(
-                "send_targeted_message",
-                json!({"body": body, "target_names": [fixer], "thread_id": thread}),
-            )
-            .await?;
-        Ok(())
+    /// The configured URL or directory of the repo named `name`.
+    fn repo_path<'b>(&'b self, name: &'b str) -> &'b str {
+        self.cfg
+            .repos
+            .iter()
+            .find(|r| r.name == name)
+            .map_or(name, |r| r.url.as_str())
     }
 }
 
@@ -658,6 +778,134 @@ mod tests {
                 .push((thread_id.into(), text.into()));
             Ok(())
         }
+    }
+
+    /// Records handoffs; fails them all when `fail` is set.
+    #[derive(Default)]
+    struct FakeFixer {
+        fail: bool,
+        sent: RefCell<Vec<(String, String, String)>>,
+    }
+
+    impl FixerChannel for FakeFixer {
+        async fn send_to(&self, target: &str, thread_id: &str, text: &str) -> Result<()> {
+            if self.fail {
+                bail!("409: target not in room");
+            }
+            self.sent
+                .borrow_mut()
+                .push((target.into(), thread_id.into(), text.into()));
+            Ok(())
+        }
+    }
+
+    /// One posted, approved lodash group in thread sw_root.
+    fn approved_group() -> (State, GroupState) {
+        let state = State::open_in_memory().unwrap();
+        let g = scanner::group(vec![finding("lodash", "GHSA-1")]).remove(0);
+        state.record(&g, t0()).unwrap();
+        state.set_thread(&g.key(), "sw_root", t0()).unwrap();
+        state.set_status(&g.key(), Status::Approved).unwrap();
+        let row = state.get(&g.key()).unwrap().unwrap();
+        (state, row)
+    }
+
+    #[tokio::test]
+    async fn approved_goes_to_assigned_then_pr_open() {
+        let (state, g) = approved_group();
+        let fixer = FakeFixer::default();
+        let reply = hand_off(
+            &state,
+            &fixer,
+            "patrol-fixer",
+            "/w/samples",
+            &g,
+            "sw_reply",
+            "alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(reply, "Approved by alice. Handed to @patrol-fixer.");
+        let sent = fixer.sent.borrow();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "patrol-fixer");
+        assert_eq!(sent[0].1, "sw_reply");
+        assert!(sent[0]
+            .2
+            .starts_with("@patrol-fixer please fix: repo /w/samples, "));
+        assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Assigned);
+
+        // Someone else talking in the thread changes nothing.
+        let other = track_fixer_reply(
+            &state,
+            "patrol-fixer",
+            Some("alice"),
+            Some("sw_root"),
+            "fix/x",
+        );
+        assert_eq!(other.unwrap(), None);
+
+        let moved = track_fixer_reply(
+            &state,
+            "patrol-fixer",
+            Some("Patrol_Fixer"),
+            Some("sw_root"),
+            "Pushed `fix/lodash-4.17.21`. PR: https://github.com/o/r/pull/3",
+        )
+        .unwrap();
+        assert_eq!(
+            moved,
+            Some((g.key.clone(), Some("fix/lodash-4.17.21".to_string())))
+        );
+        let row = state.get(&g.key).unwrap().unwrap();
+        assert_eq!(row.status, Status::PrOpen);
+        assert_eq!(row.pr_url.as_deref(), Some("fix/lodash-4.17.21"));
+
+        // Only the first reply after assignment counts.
+        let again = track_fixer_reply(
+            &state,
+            "patrol-fixer",
+            Some("patrol-fixer"),
+            Some("sw_root"),
+            "https://x",
+        );
+        assert_eq!(again.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn failed_handoff_keeps_approved_and_says_why() {
+        let (state, g) = approved_group();
+        let fixer = FakeFixer {
+            fail: true,
+            ..Default::default()
+        };
+        let reply = hand_off(&state, &fixer, "patrol-fixer", "/w", &g, "sw_root", "alice")
+            .await
+            .unwrap();
+        assert!(reply.contains("handoff to @patrol-fixer failed: 409: target not in room"));
+        assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
+    }
+
+    #[test]
+    fn fixer_name_match() {
+        assert!(is_fixer("patrol-fixer", "patrol-fixer"));
+        assert!(is_fixer("Patrol_Fixer", "patrol-fixer"));
+        assert!(is_fixer("@patrol_fixer", "patrol-fixer"));
+        assert!(!is_fixer("patrol-fixer2", "patrol-fixer"));
+        assert!(!is_fixer("baba_yaga", "patrol-fixer"));
+    }
+
+    #[test]
+    fn pr_link_takes_first_url_or_fix_branch() {
+        assert_eq!(
+            pr_link("Opened https://github.com/o/r/pull/3."),
+            Some("https://github.com/o/r/pull/3".into())
+        );
+        assert_eq!(
+            pr_link("Branch fix/lodash pushed, see https://x"),
+            Some("fix/lodash".into())
+        );
+        assert_eq!(pr_link("done"), None);
     }
 
     fn t0() -> DateTime<Utc> {

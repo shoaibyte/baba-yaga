@@ -10,7 +10,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 
 use crate::scanner::finding::FindingGroup;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 
 /// Version 2. Version 1 had one row per advisory (`findings`). This is
 /// pre-release, so the migration drops v1 rather than converting it.
@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS meta (
 /// Version 3: whether the in-thread command hint was posted. Rows from v2
 /// start at 0, so the next scan posts their hint.
 const MIGRATE_V3: &str = "ALTER TABLE groups ADD COLUMN hint_posted INTEGER NOT NULL DEFAULT 0;";
+
+/// Version 4: the branch or pull request link the fixer replied with.
+const MIGRATE_V4: &str = "ALTER TABLE groups ADD COLUMN pr_url TEXT;";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -108,6 +111,8 @@ pub struct GroupState {
     /// The command hint was posted in the thread. Posting it is what makes
     /// the thread exist on Discord.
     pub hint_posted: bool,
+    /// What the fixer replied with: a pull request URL or a `fix/` branch.
+    pub pr_url: Option<String>,
 }
 
 impl GroupState {
@@ -145,6 +150,9 @@ impl State {
             }
             if version < 3 {
                 tx.execute_batch(MIGRATE_V3)?;
+            }
+            if version < 4 {
+                tx.execute_batch(MIGRATE_V4)?;
             }
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
             tx.commit()?;
@@ -231,6 +239,15 @@ impl State {
 
     pub fn set_hint_posted(&self, key: &str) -> Result<()> {
         self.update(key, "hint_posted = 1", params![key])
+    }
+
+    /// The fixer replied: the group has a pull request (or a pushed branch).
+    pub fn set_pr_open(&self, key: &str, pr_url: Option<&str>) -> Result<()> {
+        self.update(
+            key,
+            "status = ?2, snoozed_until = NULL, pr_url = ?3",
+            params![key, Status::PrOpen.as_str(), pr_url],
+        )
     }
 
     pub fn mark_posted(&self, key: &str, now: DateTime<Utc>) -> Result<()> {
@@ -343,7 +360,7 @@ fn collect(
 }
 
 const COLUMNS: &str =
-    "key, json, thread_id, status, snoozed_until, first_seen, last_seen, last_posted, hint_posted";
+    "key, json, thread_id, status, snoozed_until, first_seen, last_seen, last_posted, hint_posted, pr_url";
 
 /// Map one row; the inner `Result` carries JSON and date errors, which
 /// rusqlite's closure type cannot.
@@ -357,6 +374,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<GroupState>> {
     let last_seen: String = row.get(6)?;
     let last_posted: Option<String> = row.get(7)?;
     let hint_posted: bool = row.get(8)?;
+    let pr_url: Option<String> = row.get(9)?;
     Ok((|| {
         Ok(GroupState {
             key,
@@ -368,6 +386,7 @@ fn read_row(row: &Row<'_>) -> rusqlite::Result<Result<GroupState>> {
             last_seen: parse_time(&last_seen)?,
             last_posted: last_posted.as_deref().map(parse_time).transpose()?,
             hint_posted,
+            pr_url,
         })
     })())
 }
@@ -547,10 +566,11 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, SCHEMA_VERSION);
         let row = s.get(&g.key()).unwrap().unwrap();
         assert_eq!(row.thread_id.as_deref(), Some("sw_root"));
         assert!(!row.hint_posted, "existing rows start without a hint");
+        assert_eq!(row.pr_url, None);
 
         s.set_hint_posted(&g.key()).unwrap();
         drop(s);
