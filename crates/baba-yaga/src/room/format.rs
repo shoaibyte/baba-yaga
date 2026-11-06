@@ -125,14 +125,30 @@ pub fn render_hint() -> String {
 /// The task for the fixer agent, posted in the finding's thread. No mention:
 /// `send_targeted_message` adds the target's own. `repo_path` is the
 /// configured repo URL or local directory; the lockfile is the first
-/// finding's manifest, relative to the repo root.
+/// finding's manifest, relative to the repo root. When the advisories list
+/// more than one fixed version, the others are named too, because the
+/// highest can be a release the registry has deprecated.
 pub fn render_handoff(group: &FindingGroup, repo_path: &str) -> String {
     let lockfile = group
         .findings
         .first()
         .map_or("unknown", |f| f.source_path.as_str());
+    let others: Vec<&str> = group
+        .fix_candidates
+        .iter()
+        .map(String::as_str)
+        .filter(|v| Some(*v) != group.highest_fixed.as_deref())
+        .collect();
+    let (other_versions, prefer) = if others.is_empty() {
+        (String::new(), "")
+    } else {
+        (
+            format!(", other fix versions: {}", others.join(", ")),
+            " If the registry marks the fix version as deprecated, use the highest other fix version that is not.",
+        )
+    };
     format!(
-        "Please fix: repo {repo_path}, ecosystem {}, package {}, current {}, fix {}, lockfile {lockfile}. Reply in this thread when the branch is pushed.",
+        "Please fix: repo {repo_path}, ecosystem {}, package {}, current {}, fix {}{other_versions}, lockfile {lockfile}.{prefer} Reply in this thread when the branch is pushed.",
         group.ecosystem,
         group.package,
         group.version,
@@ -353,6 +369,24 @@ mod tests {
             "Please fix: repo /work/samples, ecosystem npm, package axios, \
              current 0.21.1, fix 1.18.0, lockfile node/package-lock.json. \
              Reply in this thread when the branch is pushed."
+        );
+    }
+
+    #[test]
+    fn handoff_names_other_fix_versions() {
+        let mut a = finding("GHSA-a", 7.5, "s");
+        let mut b = finding("GHSA-b", 7.5, "s");
+        let mut c = finding("GHSA-c", 7.5, "s");
+        a.fixed_version = Some("4.18.0".into());
+        b.fixed_version = Some("4.17.21".into());
+        c.fixed_version = Some("4.17.12".into());
+        let g = group(vec![a, b, c]).remove(0);
+        assert_eq!(
+            render_handoff(&g, "/w"),
+            "Please fix: repo /w, ecosystem npm, package axios, current 0.21.1, \
+             fix 4.18.0, other fix versions: 4.17.12, 4.17.21, lockfile node/package-lock.json. \
+             If the registry marks the fix version as deprecated, use the highest other fix \
+             version that is not. Reply in this thread when the branch is pushed."
         );
     }
 

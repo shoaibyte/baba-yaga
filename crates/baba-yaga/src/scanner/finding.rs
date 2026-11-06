@@ -41,6 +41,13 @@ pub struct FindingGroup {
     /// The highest `fixed_version` across the findings: upgrading to it
     /// clears all of them, as far as the comparison below can tell.
     pub highest_fixed: Option<String>,
+    /// Every distinct fixed version across the findings, lowest first, by
+    /// the same comparison and hash rule as `highest_fixed` (its last
+    /// entry). The highest can be a release the registry has deprecated, so
+    /// the fixer is shown the others too. Empty in state written before this
+    /// field existed, until the next scan rewrites the row.
+    #[serde(default)]
+    pub fix_candidates: Vec<String>,
     pub max_severity: Option<f32>,
     /// `Some(true)` if any finding is reachable, `Some(false)` if at least
     /// one was analysed and none is, `None` if none was analysed.
@@ -86,8 +93,9 @@ pub fn group(findings: Vec<Finding>) -> Vec<FindingGroup> {
                 .first()
                 .map(|f| f.version.clone())
                 .unwrap_or_default();
-            let highest_fixed =
-                highest_version(findings.iter().filter_map(|f| f.fixed_version.as_deref()));
+            let fix_candidates =
+                sorted_versions(findings.iter().filter_map(|f| f.fixed_version.as_deref()));
+            let highest_fixed = fix_candidates.last().cloned();
             let max_severity = findings
                 .iter()
                 .filter_map(|f| f.severity_score)
@@ -106,6 +114,7 @@ pub fn group(findings: Vec<Finding>) -> Vec<FindingGroup> {
                 version,
                 findings,
                 highest_fixed,
+                fix_candidates,
                 max_severity,
                 any_reachable,
             }
@@ -119,7 +128,14 @@ pub fn group(findings: Vec<Finding>) -> Vec<FindingGroup> {
 /// pre-release tags or ecosystem rules, so `1.0.0-rc1` vs `1.0.0` or PEP 440
 /// epochs can come out wrong. Git commit hashes, which OSV lists as fixes
 /// for some PyPI packages, are used only when nothing else is available.
+#[cfg(test)]
 pub fn highest_version<'a>(versions: impl Iterator<Item = &'a str>) -> Option<String> {
+    sorted_versions(versions).pop()
+}
+
+/// The distinct `versions`, lowest first, ordered as `highest_version`
+/// orders them, with commit hashes dropped unless nothing else is listed.
+pub fn sorted_versions<'a>(versions: impl Iterator<Item = &'a str>) -> Vec<String> {
     let all: Vec<&str> = versions.collect();
     let looks_like_version = |v: &&str| {
         v.trim_start_matches('v')
@@ -131,10 +147,10 @@ pub fn highest_version<'a>(versions: impl Iterator<Item = &'a str>) -> Option<St
     } else {
         all
     };
-    candidates
-        .into_iter()
-        .max_by(|a, b| compare_versions(a, b))
-        .map(str::to_string)
+    let mut sorted: Vec<&str> = candidates;
+    sorted.sort_by(|a, b| compare_versions(a, b).then_with(|| a.cmp(b)));
+    sorted.dedup();
+    sorted.into_iter().map(str::to_string).collect()
 }
 
 /// Seven or more hex digits with at least one letter and no dot: an
@@ -202,6 +218,7 @@ mod tests {
         assert_eq!(lodash.vuln_ids(), vec!["GHSA-a", "GHSA-c"]);
         assert_eq!(lodash.findings[0].id, "GHSA-c", "highest severity first");
         assert_eq!(lodash.highest_fixed.as_deref(), Some("4.17.21"));
+        assert_eq!(lodash.fix_candidates, vec!["4.17.19", "4.17.21"]);
         assert_eq!(lodash.max_severity, Some(9.1));
         assert_eq!(lodash.any_reachable, None);
     }
@@ -218,6 +235,26 @@ mod tests {
         );
         b.reachable = Some(true);
         assert_eq!(group(vec![a, b])[0].any_reachable, Some(true));
+    }
+
+    #[test]
+    fn fix_candidates_are_distinct_and_sorted() {
+        let s = |v: &[&str]| sorted_versions(v.iter().copied());
+        assert_eq!(
+            s(&["4.18.0", "4.17.21", "4.17.12", "4.17.21"]),
+            vec!["4.17.12", "4.17.21", "4.18.0"]
+        );
+        assert_eq!(
+            s(&["bd8153872e9c6fc98f4023df9c2deaffea2fa463", "2.0.1"]),
+            vec!["2.0.1"]
+        );
+        assert!(s(&[]).is_empty());
+        let groups = group(vec![
+            f("lodash", "GHSA-a", None, Some("4.18.0")),
+            f("lodash", "GHSA-b", None, Some("4.17.21")),
+        ]);
+        assert_eq!(groups[0].fix_candidates, vec!["4.17.21", "4.18.0"]);
+        assert_eq!(groups[0].highest_fixed.as_deref(), Some("4.18.0"));
     }
 
     #[test]
