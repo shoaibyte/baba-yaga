@@ -35,7 +35,7 @@ The system has three zones. On the left are the sensors: osv-scanner run over ea
                  room document baba-yaga-audit
 ```
 
-Status of a package moves `open -> approved -> assigned -> pr_open`, or to `snoozed` or `rejected`.
+Status of a package moves `open -> approved -> assigned -> pr_open`, or to `snoozed` or `rejected`. It becomes `resolved` when the scanner stops reporting it. If an assigned or pr_open package comes back at a new installed version that still has advisories, it returns to `open` so it can be approved again.
 
 ## Quickstart
 

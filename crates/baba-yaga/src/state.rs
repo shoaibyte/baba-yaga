@@ -250,6 +250,16 @@ impl State {
         )
     }
 
+    /// Back to open after a fix that left advisories: clears the PR link
+    /// and any snooze.
+    pub fn reopen(&self, key: &str) -> Result<()> {
+        self.update(
+            key,
+            "status = ?2, snoozed_until = NULL, pr_url = NULL",
+            params![key, Status::Open.as_str()],
+        )
+    }
+
     pub fn mark_posted(&self, key: &str, now: DateTime<Utc>) -> Result<()> {
         self.update(key, "last_posted = ?2", params![key, now.to_rfc3339()])
     }

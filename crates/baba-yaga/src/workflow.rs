@@ -137,6 +137,9 @@ pub struct Summary {
     pub rejected: usize,
     /// Groups resolved in this run because the scan no longer reports them.
     pub gone: usize,
+    /// Groups back to open because a fix changed the version but left
+    /// advisories.
+    pub reopened: usize,
     /// Names of the repos whose scan failed.
     pub failed_repos: Vec<String>,
 }
@@ -157,6 +160,9 @@ impl std::fmt::Display for Summary {
         )?;
         if self.gone > 0 {
             write!(f, ", {} no longer reported", self.gone)?;
+        }
+        if self.reopened > 0 {
+            write!(f, ", {} reopened after a version change", self.reopened)?;
         }
         if !self.failed_repos.is_empty() {
             write!(f, ", {} repos failed to scan", self.failed_repos.len())?;
@@ -310,6 +316,54 @@ pub(crate) async fn resolve_gone<P: RoomPoster>(
     }
     summary.gone += gone.len();
     Ok(gone)
+}
+
+/// Reopen every group in `groups` that state holds as assigned or pr_open
+/// at a different installed version: the fix moved the package but the scan
+/// still reports advisories for it. Each is set back to open with its PR
+/// link cleared, recorded at the new version (so `publish` sees no change
+/// and posts no second update), and told so in its thread. Returns the
+/// reopened keys.
+pub(crate) async fn reopen_changed<P: RoomPoster>(
+    state: &State,
+    poster: &P,
+    groups: &[FindingGroup],
+    now: DateTime<Utc>,
+    summary: &mut Summary,
+) -> Result<Vec<String>> {
+    let mut reopened = Vec::new();
+    for g in groups {
+        let key = g.key();
+        let Some(ex) = state.get(&key)? else {
+            continue;
+        };
+        if !matches!(ex.status, Status::Assigned | Status::PrOpen) || ex.group.version == g.version
+        {
+            continue;
+        }
+        state.reopen(&key)?;
+        state.record(g, now)?;
+        tracing::info!(
+            %key,
+            was = ex.status.as_str(),
+            from = %ex.group.version,
+            to = %g.version,
+            "reopened: version changed, advisories remain"
+        );
+        if let Some(thread_id) = &ex.thread_id {
+            // The state change stands even if the reply fails.
+            match poster.reply(thread_id, &format::render_reopened(g)).await {
+                Ok(_) => state.mark_posted(&key, now)?,
+                Err(e) => {
+                    tracing::warn!(%key, error = %format!("{e:#}"), "reopened reply not posted")
+                }
+            }
+            tokio::time::sleep(POST_GAP).await;
+        }
+        reopened.push(key);
+    }
+    summary.reopened += reopened.len();
+    Ok(reopened)
 }
 
 /// The command hint as the thread's first reply, so the thread exists for
@@ -550,6 +604,12 @@ impl Agent<'_> {
             &mut summary,
         )
         .await?;
+        let reopened =
+            reopen_changed(&self.state, &Live(&self.client), &groups, now, &mut summary).await?;
+        for key in reopened {
+            let line = audit::event_line(Utc::now(), &key, "reopened after version change");
+            self.audit.append(&self.client, &self.state, &line).await?;
+        }
         publish(
             &groups,
             Some(&self.state),
@@ -1042,6 +1102,84 @@ mod tests {
             .unwrap();
         assert!(reply.contains("handoff to patrol-fixer failed: 409: target not in room"));
         assert_eq!(state.get(&g.key).unwrap().unwrap().status, Status::Approved);
+    }
+
+    #[tokio::test]
+    async fn version_change_with_advisories_reopens() {
+        let state = State::open_in_memory().unwrap();
+        let at = |package: &str, version: &str, fixed: &str| {
+            let mut f = finding(package, "GHSA-1");
+            f.version = version.into();
+            f.fixed_version = Some(fixed.into());
+            scanner::group(vec![f]).remove(0)
+        };
+        // lodash went to the fixer at 4.17.15 and came back at 4.18.0, which
+        // is still reported. axios is assigned and unchanged. minimist moved
+        // version but is only open, so it is a plain update.
+        let rows = [
+            (
+                at("lodash", "4.17.15", "4.18.0"),
+                Status::PrOpen,
+                "sw_lodash",
+            ),
+            (
+                at("axios", "0.21.0", "0.21.2"),
+                Status::Assigned,
+                "sw_axios",
+            ),
+            (
+                at("minimist", "1.2.0", "1.2.6"),
+                Status::Open,
+                "sw_minimist",
+            ),
+        ];
+        for (g, status, thread) in &rows {
+            state.record(g, t0()).unwrap();
+            state.set_thread(&g.key(), thread, t0()).unwrap();
+            state.set_hint_posted(&g.key()).unwrap();
+            state.set_status(&g.key(), *status).unwrap();
+        }
+        state
+            .set_pr_open("samples:npm:lodash", Some("https://github.com/o/r/pull/1"))
+            .unwrap();
+
+        let scan = vec![
+            at("lodash", "4.18.0", "4.18.1"),
+            at("axios", "0.21.0", "0.21.2"),
+            at("minimist", "1.2.5", "1.2.6"),
+        ];
+        let poster = Recorder::default();
+        let mut summary = Summary::default();
+        let reopened = reopen_changed(&state, &poster, &scan, t0(), &mut summary)
+            .await
+            .unwrap();
+
+        assert_eq!(reopened, vec!["samples:npm:lodash"]);
+        assert_eq!(summary.reopened, 1);
+        let lodash = state.get("samples:npm:lodash").unwrap().unwrap();
+        assert_eq!(lodash.status, Status::Open);
+        assert_eq!(lodash.pr_url, None);
+        assert_eq!(lodash.group.version, "4.18.0");
+        assert_eq!(
+            poster.replies.borrow().as_slice(),
+            &[(
+                "sw_lodash".to_string(),
+                "Installed 4.18.0 still has 1 advisory (fix 4.18.1). Reply approve to hand it to the fixer again."
+                    .to_string()
+            )]
+        );
+        let status = |k: &str| state.get(k).unwrap().unwrap().status;
+        assert_eq!(status("samples:npm:axios"), Status::Assigned);
+        assert_eq!(status("samples:npm:minimist"), Status::Open);
+
+        // publish then posts no second message for lodash, only minimist's
+        // update.
+        publish(&scan, Some(&state), &poster, t0(), &mut summary)
+            .await
+            .unwrap();
+        let replies = poster.replies.borrow();
+        assert!(replies[1..].iter().all(|(t, _)| t != "sw_lodash"));
+        assert!(replies[1..].iter().any(|(t, _)| t == "sw_minimist"));
     }
 
     #[test]

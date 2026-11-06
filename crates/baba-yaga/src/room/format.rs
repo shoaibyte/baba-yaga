@@ -127,6 +127,20 @@ pub fn render_gone(package: &str) -> String {
     format!("Resolved: {package} is no longer reported by the scanner.")
 }
 
+/// The thread reply for a group that was with the fixer but whose new
+/// installed version is still reported.
+pub fn render_reopened(group: &FindingGroup) -> String {
+    let fix = match &group.highest_fixed {
+        Some(v) => format!("fix {v}"),
+        None => "no fix version listed".to_string(),
+    };
+    format!(
+        "Installed {} still has {} ({fix}). Reply approve to hand it to the fixer again.",
+        group.version,
+        advisories(group.vuln_ids().len())
+    )
+}
+
 /// The task for the fixer agent, posted in the finding's thread. No mention:
 /// `send_targeted_message` adds the target's own. `repo_path` is the
 /// configured repo URL or local directory; the lockfile is the first
