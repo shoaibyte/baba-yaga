@@ -2,6 +2,10 @@
 
 ### Vulnerabilities enter the room. Fixes leave as pull requests.
 
+![Baba-Yaga workflow overview](docs/img/overview.png)
+
+*Illustration of the workflow. The screenshots further down are real captures.*
+
 **A human-in-the-loop dependency security patrol built with Rust, [OSV-Scanner](https://google.github.io/osv-scanner/) and [Switch](https://docs.switchagents.ai/).**
 
 [![Rust](https://img.shields.io/badge/Built_with-Rust-CE422F?logo=rust&logoColor=white)](https://www.rust-lang.org/)
@@ -11,7 +15,9 @@
 
 > **The idea:** turn dependency vulnerability alerts into conversations a team can act on. People approve the fix in a Discord thread; a second agent prepares the pull request. No silent, autonomous dependency changes.
 
-Demo video: TBD
+[![Baba-Yaga demo video](docs/img/banner.png)](https://youtu.be/jJCuZW_2QxI)
+
+Demo video: https://youtu.be/jJCuZW_2QxI (2 min 20 s, unlisted).
 
 **Jump to:** [See it in action](#see-it-in-action) · [Try it](#-try-it-yourself) · [How Switch powers it](#why-switch-is-essential) · [Commands](#-talk-to-baba-yaga) · [Architecture](#under-the-hood) · [Troubleshooting](#-troubleshooting)
 
@@ -46,6 +52,10 @@ The status reply in Discord:
 One finding's thread, from the human approve to the fixer's PR reply:
 
 ![approve, handoff and fixer PR reply in one thread](docs/img/handoff.png)
+
+The fixer's pull request, reviewed and merged by a human; the next scan closed the thread.
+
+![PR #3 opened by patrol-fixer and merged: minimist 1.2.5 to 1.2.6](docs/img/pr-merged.png)
 
 <details>
 <summary><strong>Try the other choices</strong>: what if a fix can wait?</summary>
